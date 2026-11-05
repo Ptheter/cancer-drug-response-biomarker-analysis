@@ -1,0 +1,27 @@
+# Python environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pkl
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Raw datasets
+data/*
+!data/README.md
+
+# Generated temporary files
+*.log
+.DS_Store
+Thumbs.db
+
+# OS and editor files
+.vscode/
+
+# Generated analysis outputs
+outputs/
