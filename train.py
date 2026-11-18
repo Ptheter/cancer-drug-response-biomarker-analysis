@@ -1552,18 +1552,21 @@ def validate_known_biomarkers(
     novel_genes = total_genes - known_genes
     overlap_pct = (known_genes / total_genes * 100) if total_genes > 0 else 0
 
-    # top known genes by mean importance score
     top_known = (
-        biomarkers[biomarkers["In_OncoKB"]]
-        .groupby("Gene")
-        .agg(
-            Mean_Importance=("Importance_Score", "mean"),
-            Num_Drugs=("Drug", "nunique"),
-            Num_Pathways=("Pathway", "nunique")
-        )
-        .sort_values("Mean_Importance", ascending=False)
-        .reset_index()
+    biomarkers[biomarkers["In_OncoKB"]]
+    .groupby(["Importance_Method", "Gene"])
+    .agg(
+        Mean_Importance=("Importance_Score", "mean"),
+        Num_Drugs=("Drug", "nunique"),
+        Num_Pathways=("Pathway", "nunique")
     )
+    .sort_values(["Importance_Method", "Mean_Importance"], ascending=[True, False])
+    .reset_index()
+)
+
+    print("\nTop recovered known cancer genes (Pearson):")
+    if len(top_known) > 0:
+        print(top_known[top_known["Importance_Method"] == "Pearson"].head(15))
 
     # save outputs
     overlap_file = os.path.join(output_dir, "known_cancer_gene_overlap.csv")
@@ -1578,8 +1581,8 @@ def validate_known_biomarkers(
 
     print(f"Total unique genes discovered: {total_genes}")
     print(f"Known cancer genes recovered:   {known_genes}")
-    print(f"Novel genes:                   {novel_genes}")
-    print(f"OncoKB overlap:                {overlap_pct:.2f}%")
+    print(f"Not in OncoKB:                 {novel_genes}")
+    print(f"In OncoKB (descriptive only):  {overlap_pct:.2f}%")
 
     print("\nTop recovered known cancer genes:")
     if len(top_known) > 0:
@@ -1718,6 +1721,9 @@ def main():
 
     log.info(f"Total drugs: {len(drug_list)}")
 
+    # temporal test
+    drug_list = drug_list[:4]
+
     # ── Cache-aware dispatch ──────────────────────────────────────────────────
     to_run, cached = [], {}
     for d in drug_list:
@@ -1807,9 +1813,9 @@ def main():
     )
 
     validate_known_biomarkers(
-    biomarker_csv_path=os.path.join(CFG["output_dir"], "biomarker_summary.csv"),
-    oncokb_csv_path=os.path.join(CFG["data_dir"], "cancerGeneList.tsv"),
-    output_dir=CFG["output_dir"]
+        biomarker_csv_path=os.path.join(CFG["output_dir"], "biomarker_summary.csv"),
+        oncokb_csv_path=os.path.join(CFG["data_dir"], "cancerGeneList.tsv"),
+        output_dir=CFG["output_dir"]
 )
     oncokb = pd.read_csv(os.path.join(CFG["data_dir"], "cancerGeneList.tsv"), sep="\t")
     bm = pd.read_csv(os.path.join(CFG["output_dir"], "biomarker_summary.csv"))
