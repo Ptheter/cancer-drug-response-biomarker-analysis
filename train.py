@@ -104,7 +104,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression, LassoCV, ElasticNetCV
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import r2_score, mean_squared_error
-from sklearn.model_selection import KFold, cross_val_score, train_test_split
+from sklearn.model_selection import KFold, cross_val_score, cross_validate, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
@@ -516,6 +516,31 @@ def build_model_dict(cfg: dict) -> dict:
                                      verbosity=0, n_jobs=1), False),
     }
 
+def select_genes(pathway_name, target_str, available, hallmark, auto_mapping, cfg):
+    """Candidate genes offered to the models for one drug.
+    Returns (sorted gene list, used_fallback). Sorted => reproducible feature
+    order (set order differs between worker processes)."""
+    target_genes  = get_target_genes(target_str)
+    pathway_genes = PATHWAY_TO_GENES.get(pathway_name, [])
+    expanded      = expand_with_msigdb(pathway_name, pathway_genes, hallmark, auto_mapping)
+    avail = sorted(g for g in set(target_genes + expanded) if g in available)
+    if len(avail) < cfg["min_avail_genes"]:
+        return sorted(g for g in FALLBACK_GENES if g in available), True
+    return avail, False
+
+def pca_n_components(n_features: int, n_train: int, cfg: dict) -> int:
+    fold_n = int(n_train * (1 - 1 / cfg["n_splits"]))   # size of a CV training fold
+    return max(2, min(cfg["pca_max"], n_features, fold_n - 1))
+
+def build_pipeline(estimator, use_pca: bool, n_components: int) -> Pipeline:
+    """Every model is ONE pipeline that takes the RAW gene matrix.
+    Scaling (and PCA) are fitted inside each CV fold -> no leakage, and
+    importance can always be computed on gene columns."""
+    steps = [("scaler", StandardScaler())]
+    if use_pca:
+        steps.append(("pca", PCA(n_components=n_components)))
+    steps.append(("model", estimator))
+    return Pipeline(steps)
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
@@ -695,7 +720,6 @@ def run_drug(
     drug_to_pathway, drug_to_target,
     hallmark, auto_msig_mapping, cell_tissue, cfg,
 ):
-    # Reconstruct clean DataFrame from numpy — avoids joblib serialization artifacts
     expr = pd.DataFrame(expr_values, index=expr_genes,
                         columns=expr_cells).astype(np.float32)
 
@@ -703,17 +727,14 @@ def run_drug(
     drug_df    = drug_response[drug_response["DRUG_NAME"] == drug_name]
     drug_df    = drug_df[["COSMIC_ID", "LN_IC50"]].dropna()
     common_ids = list(set(expr.columns).intersection(set(drug_df["COSMIC_ID"])))
-
     if len(common_ids) < cfg["min_samples"]:
         log.info(f"[SKIP] {drug_name}: only {len(common_ids)} samples.")
         return None
 
     X_full = expr[common_ids].T.copy()
     X_full.columns = X_full.columns.astype(str)
-    X_full = X_full.replace([np.inf, -np.inf], np.nan)
-    X_full = X_full.dropna(axis=1)
+    X_full = X_full.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
 
-    # ── Align y ───────────────────────────────────────────────────────────────
     drug_indexed = drug_df.set_index("COSMIC_ID")
     drug_indexed = drug_indexed[~drug_indexed.index.duplicated(keep="first")]
     y_series     = drug_indexed.reindex(X_full.index.astype(int))["LN_IC50"]
@@ -721,36 +742,26 @@ def run_drug(
     X_full       = X_full.iloc[valid_mask]
     y            = y_series.values[valid_mask]
     common_ids   = list(X_full.index.astype(int))
-
     if len(common_ids) < cfg["min_samples"]:
         log.info(f"[SKIP] {drug_name}: only {len(common_ids)} samples after alignment.")
         return None
-
-    assert len(X_full) == len(y), f"Shape mismatch: X={len(X_full)}, y={len(y)}"
+    assert len(X_full) == len(y)
 
     X_full = X_full.loc[:, ~X_full.columns.duplicated()]
     X_full = X_full.loc[:, X_full.columns != "nan"]
 
     # ── Gene set ──────────────────────────────────────────────────────────────
-    pathway_name  = drug_to_pathway.get(drug_name, "Other")
-    target_genes  = get_target_genes(drug_to_target.get(drug_name, ""))
-    pathway_genes = PATHWAY_TO_GENES.get(pathway_name, [])
-    expanded      = expand_with_msigdb(pathway_name, pathway_genes, hallmark, auto_msig_mapping)
-    avail_genes   = [g for g in set(target_genes + expanded) if g in X_full.columns]
-
-    using_fallback = False
-    if len(avail_genes) < cfg["min_avail_genes"]:
-        avail_genes    = [g for g in FALLBACK_GENES if g in X_full.columns]
-        using_fallback = True
-
-    log.info(
-        f"{drug_name} | {pathway_name} | "
-        f"genes={len(avail_genes)} {'(fallback)' if using_fallback else ''}"
+    pathway_name = drug_to_pathway.get(drug_name, "Other")
+    avail_genes, using_fallback = select_genes(
+        pathway_name, drug_to_target.get(drug_name, ""),
+        set(X_full.columns), hallmark, auto_msig_mapping, cfg,
     )
+    log.info(f"{drug_name} | {pathway_name} | genes={len(avail_genes)} "
+             f"{'(fallback)' if using_fallback else ''}")
 
     X = X_full[avail_genes].values.astype(np.float32)
 
-    # ── Train / test split ────────────────────────────────────────────────────
+    # ── Split once. Test set is used ONLY for final reporting (FIX 2) ─────────
     idx = np.arange(len(common_ids))
     idx_train, idx_test = train_test_split(
         idx, test_size=cfg["test_size"], random_state=cfg["random_state"]
@@ -759,141 +770,91 @@ def run_drug(
     y_train, y_test = y[idx_train], y[idx_test]
     test_ids = [common_ids[i] for i in idx_test]
 
-    # ── Preprocessing ─────────────────────────────────────────────────────────
-    scaler      = StandardScaler().fit(X_train)
-    X_train_sc  = scaler.transform(X_train)
-    X_test_sc   = scaler.transform(X_test)
-    X_sc        = scaler.transform(X)
-
-    pca_pipe    = make_pca_pipeline(X_train.shape[1], X_train.shape[0], cfg)
-    pca_pipe.fit(X_train)
-    X_train_pca = pca_pipe.transform(X_train)
-    X_test_pca  = pca_pipe.transform(X_test)
-    X_pca       = pca_pipe.transform(X)
-
+    n_comp = pca_n_components(X_train.shape[1], X_train.shape[0], cfg)
     kf     = KFold(n_splits=cfg["n_splits"], shuffle=True, random_state=cfg["random_state"])
     models = build_model_dict(cfg)
 
-    result_rows, cv_rows, strat_rows, imp_rows, pi_rows = [], [], [], [], []
-
-    best_r2         = -np.inf
-    best_model      = None
-    best_model_name = None
-    best_preds      = None
-    best_X_test     = None
-    best_X_train    = None
-    best_y_train    = None
-    best_is_tree    = False
-    best_gene_names = []
+    result_rows, cv_rows, imp_rows, strat_rows, pi_rows = [], [], [], [], []
+    best_cv, best_name, best_pipe, best_preds = -np.inf, None, None, None
 
     for model_name, (estimator, use_pca) in models.items():
-        if use_pca:
-            cv_pipeline = Pipeline([
-                ("scaler", StandardScaler()),
-                ("pca",    PCA(n_components=pca_pipe.named_steps["pca"].n_components_)),
-                ("model",  estimator),
-            ])
-            X_cv, X_tr, X_te = X, X_train_pca, X_test_pca
-        else:
-            cv_pipeline = Pipeline([
-                ("scaler", StandardScaler()),
-                ("model",  estimator),
-            ])
-            X_cv, X_tr, X_te = X, X_train_sc, X_test_sc
+        pipe = build_pipeline(estimator, use_pca, n_comp)
 
-        cv_r2   = cross_val_score(cv_pipeline, X_cv, y, cv=kf, scoring="r2")
-        cv_rmse = np.sqrt(-cross_val_score(
-            cv_pipeline, X_cv, y, cv=kf, scoring="neg_mean_squared_error"
-        ))
+        # CV on the TRAINING split only -> model selection never sees test data
+        cv = cross_validate(
+            pipe, X_train, y_train, cv=kf,
+            scoring={"r2": "r2", "mse": "neg_mean_squared_error"},
+        )
+        cv_r2   = cv["test_r2"]
+        cv_rmse = np.sqrt(-cv["test_mse"])
 
         cv_rows.append({
             "Drug": drug_name, "Pathway": pathway_name,
             "Model": model_name, "Input": "PCA" if use_pca else "Raw",
             "N_Genes": len(avail_genes),
-            "CV_R2_mean": cv_r2.mean(), "CV_R2_std": cv_r2.std(),
-            "CV_RMSE_mean": cv_rmse.mean(), "CV_RMSE_std": cv_rmse.std(),
+            "CV_R2_mean": float(cv_r2.mean()), "CV_R2_std": float(cv_r2.std()),
+            "CV_RMSE_mean": float(cv_rmse.mean()), "CV_RMSE_std": float(cv_rmse.std()),
         })
 
-        X_tr_fit = np.asarray(X_tr, dtype=np.float32)
-        X_te_fit = np.asarray(X_te, dtype=np.float32)
-        estimator.fit(X_tr_fit, y_train)
-        preds = estimator.predict(X_te_fit)
+        pipe.fit(X_train, y_train)
+        preds = pipe.predict(X_test)
         r2    = r2_score(y_test, preds)
-        rmse  = np.sqrt(mean_squared_error(y_test, preds))
+        rmse  = float(np.sqrt(mean_squared_error(y_test, preds)))
 
         result_rows.append({
             "Drug": drug_name, "Pathway": pathway_name,
             "Model": model_name, "Input": "PCA" if use_pca else "Raw",
-            "N_Genes": len(avail_genes), "R2": r2, "RMSE": rmse,
+            "N_Genes": len(avail_genes), "R2": float(r2), "RMSE": rmse,
+            "Selected": False,
         })
+        log.info(f"  {model_name:12s} [{'PCA' if use_pca else 'Raw':3s}] | "
+                 f"CV R²={cv_r2.mean():.3f} ± {cv_r2.std():.3f} | Test R²={r2:.3f}")
 
-        log.info(
-            f"  {model_name:15s} [{'PCA' if use_pca else 'Raw':3s}] | "
-            f"Test R²={r2:.3f}  RMSE={rmse:.3f} | "
-            f"CV R²={cv_r2.mean():.3f} ± {cv_r2.std():.3f}"
-        )
-
-        if model_name != "Dummy" and r2 > best_r2:
-            best_r2         = r2
-            best_model      = estimator
-            best_model_name = model_name
-            best_preds      = preds
-            best_X_test     = X_te_fit.copy()
-            best_X_train    = X_tr_fit.copy()
-            best_y_train    = y_train.copy()
-            best_is_tree    = model_name in TREE_MODELS
-            best_gene_names = avail_genes.copy()
-
-    # ── P1: Feature importance ────────────────────────────────────────────────
-    if best_model is not None:
-        if best_is_tree:
-            # XGBoost / RandomForest: use built-in gain-based importance
-            imp_local = compute_tree_importance(best_model, best_gene_names)
-            method    = "XGB_importance" if best_model_name == "XGBoost" else "RF_importance"
-        else:
-            # Linear models: permutation importance in PCA space
-            imp_local = compute_permutation_imp(
-                best_model, best_X_test, y_test, best_gene_names, cfg
+        # FIX 2: choose by CV R² (not test R²)
+        if model_name != "Dummy" and cv_r2.mean() > best_cv:
+            best_cv, best_name, best_pipe, best_preds = (
+                float(cv_r2.mean()), model_name, pipe, preds
             )
-            method = "Permutation"
 
-        # Also compute Pearson correlation on raw gene expression for all models
-        corr_local = compute_correlation_importance(best_X_test, y_test, best_gene_names)
+    for row in result_rows:
+        row["Selected"] = bool(row["Model"] == best_name)
+
+    # ── Feature importance — always in GENE space (FIX 1) ─────────────────────
+    if best_pipe is not None:
+        if best_name in TREE_MODELS:
+            imp_local = compute_tree_importance(best_pipe.named_steps["model"], avail_genes)
+            method    = "XGB_importance" if best_name == "XGBoost" else "RF_importance"
+        else:
+            # whole pipeline (scaler + PCA + model) is permuted on raw genes
+            imp_local = compute_permutation_imp(best_pipe, X_test, y_test, avail_genes, cfg)
+            method    = "Permutation"
+
+        # Descriptive Pearson r(gene, LN_IC50) on raw expression, all samples
+        corr_local = compute_correlation_importance(X, y, avail_genes)
 
         for rank, row in enumerate(imp_local.itertuples(index=False)):
             imp_rows.append({
-                "Drug": drug_name, "Pathway": pathway_name,
-                "Model": best_model_name, "Method": method,
-                "Gene": row.gene, "Importance": float(row.importance),
-                "Rank": rank + 1,
+                "Drug": drug_name, "Pathway": pathway_name, "Model": best_name,
+                "Method": method, "Gene": row.gene,
+                "Importance": float(row.importance), "Rank": rank + 1,
+            })
+        for rank, row in enumerate(corr_local.itertuples(index=False)):
+            imp_rows.append({
+                "Drug": drug_name, "Pathway": pathway_name, "Model": best_name,
+                "Method": "Pearson", "Gene": row.gene,
+                "Importance": float(row.importance), "Rank": rank + 1,
+                "r": float(row.r),
             })
 
-        for rank, row in enumerate(corr_local.itertuples(index=False)):
-            entry = {
-                "Drug": drug_name, "Pathway": pathway_name,
-                "Model": best_model_name, "Method": "Pearson",
-                "Gene": row.gene, "Importance": float(row.importance),
-                "Rank": rank + 1,
-            }
-            if hasattr(row, "r"):
-                entry["r"] = float(row.r)
-            imp_rows.append(entry)
-
-    # ── P2: Stratified R² ─────────────────────────────────────────────────────
+    # ── Stratified R² / prediction intervals use the CV-selected model ────────
     if best_preds is not None and cell_tissue is not None:
-        strat_rows = stratified_r2(
-            best_preds, y_test, test_ids, cell_tissue, drug_name, cfg
-        )
-
-    # ── P4: Prediction intervals ──────────────────────────────────────────────
-    if best_X_train is not None:
-        pi_rows = fit_prediction_intervals(
-            best_X_train, best_y_train, best_X_test, y_test, drug_name, cfg
-        )
+        strat_rows = stratified_r2(best_preds, y_test, test_ids, cell_tissue, drug_name, cfg)
+    if best_pipe is not None:
+        pi_rows = fit_prediction_intervals(X_train, y_train, X_test, y_test, drug_name, cfg)
 
     return result_rows, cv_rows, strat_rows, imp_rows, pi_rows, {
         "Drug": drug_name,
-        "y_test": best_y_train.tolist() if best_preds is None else y_test.tolist(),
+        "y_test": y_test.tolist(),
         "preds": best_preds.tolist() if best_preds is not None else None,
         "test_ids": test_ids,
     }
@@ -986,6 +947,30 @@ def load_data(cfg: dict):
         )
 
     return expr, gdsc1, gdsc2, cell_tissue
+
+def build_drug_response(gdsc1: pd.DataFrame, gdsc2: pd.DataFrame) -> pd.DataFrame:
+    """Keep GDSC1 and GDSC2 as separate analysis units.
+
+    They use different assays/drug panels, so averaging LN_IC50 across them
+    mixes two measurement processes. Each (drug, screen) pair becomes its own
+    'drug' named e.g. 'Erlotinib [GDSC2]', so everything downstream
+    (caching, CV, figures) works unchanged. DRUG_BASE keeps the plain name for
+    later cross-dataset matching (CTRP / PRISM)."""
+    cols = ["COSMIC_ID", "DRUG_NAME", "LN_IC50", "PATHWAY_NAME", "PUTATIVE_TARGET"]
+    dr = pd.concat(
+        [gdsc1[cols].assign(SCREEN="GDSC1"), gdsc2[cols].assign(SCREEN="GDSC2")],
+        ignore_index=True,
+    ).dropna(subset=["COSMIC_ID", "DRUG_NAME", "LN_IC50"])
+    dr["DRUG_BASE"] = dr["DRUG_NAME"].astype(str)
+    dr["DRUG_NAME"] = dr["DRUG_BASE"] + " [" + dr["SCREEN"] + "]"
+    return (
+        dr.groupby(["COSMIC_ID", "DRUG_NAME"], as_index=False)
+          .agg(LN_IC50=("LN_IC50", "mean"),          # only replicate rows within ONE screen
+               PATHWAY_NAME=("PATHWAY_NAME", "first"),
+               PUTATIVE_TARGET=("PUTATIVE_TARGET", "first"),
+               DRUG_BASE=("DRUG_BASE", "first"),
+               SCREEN=("SCREEN", "first"))
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1116,7 +1101,7 @@ def plot_figure2e(predictions_dict, cell_tissue, top_drugs, cfg):
         tissues = cell_tissue.reindex(test_ids_numeric).fillna("Unknown").values
 
         unique_t = sorted(set(tissues))
-        cmap = plt.cm.get_cmap("tab20", max(len(unique_t), 1))
+        cmap = plt.get_cmap("tab20", max(len(unique_t), 1))
         color_map = {t: cmap(i) for i, t in enumerate(unique_t)}
 
         # ── Scatter plot ──
@@ -1153,7 +1138,7 @@ def plot_figure2e(predictions_dict, cell_tissue, top_drugs, cfg):
         return
 
     fig.suptitle(
-        "Figure 2B — Predicted vs Actual LN_IC50 (top drugs)\n"
+        "Figure 2E — Predicted vs Actual LN_IC50 (top drugs)\n"
         "coloured by tissue of origin",
         fontsize=11,
         y=1.01
@@ -1607,71 +1592,75 @@ def validate_known_biomarkers(
     print("\nValidation completed successfully.")
     print("=" * 70)
 
-"""
-Hypergeometric test for enrichment of OncoKB genes in discovered biomarkers.
-"""
+def compute_oncokb_enrichment(universe_genes, biomarker_genes, oncokb_genes) -> dict:
+    """One-sided hypergeometric test. `universe_genes` must be the pool the
+    biomarkers could actually have come from (the candidate genes offered to
+    the models), NOT every gene on the array."""
+    onc      = {g.upper() for g in oncokb_genes}
+    universe = {g.upper() for g in universe_genes}
+    bio      = {g.upper() for g in biomarker_genes} & universe
 
-def compute_oncokb_enrichment(expr, biomarkers, oncokb_genes):
-
-    universe_genes = set(expr.index.astype(str).str.upper())
-    oncokb_genes = set([g.upper() for g in oncokb_genes])
-
-    universe_oncokb = universe_genes.intersection(oncokb_genes)
-
-    N = len(universe_genes)          # total genes
-    K = len(universe_oncokb)        # OncoKB genes in universe
-
-    biomarker_genes = set(
-        biomarkers["Gene"].dropna().astype(str).str.upper()
-    ).intersection(universe_genes)
-
-    n = len(biomarker_genes)
-    k = len(biomarker_genes.intersection(universe_oncokb))
-
-    # Hypergeometric test
-    rv = hypergeom(N, K, n)
-    p_value = rv.sf(k - 1)  # P(X >= k)
-
-    # expected overlap
-    expected = n * (K / N)
-
-    # enrichment fold
-    enrichment = (k / expected) if expected > 0 else 0
-
+    N, K = len(universe), len(universe & onc)
+    n, k = len(bio), len(bio & onc)
+    p = hypergeom(N, K, n).sf(k - 1)
+    expected = n * K / N if N else 0.0
     return {
-        "N_total_genes": N,
-        "K_oncokb_genes": K,
-        "n_biomarkers": n,
-        "k_overlap": k,
+        "N_total_genes": N, "K_oncokb_genes": K, "n_biomarkers": n, "k_overlap": k,
         "expected_overlap": expected,
-        "enrichment_fold": enrichment,
-        "p_value": p_value
+        "enrichment_fold": (k / expected) if expected > 0 else 0.0,
+        "p_value": float(p),
     }
 
-def print_enrichment_results(res):
+def oncokb_permutation_null(candidate_pools: dict, biomarkers: pd.DataFrame,
+                            oncokb_genes, n_perm: int = 2000, seed: int = 42) -> dict:
+    """Drug-aware null. For each drug, redraw as many genes as were selected
+    from THAT drug's own candidate pool; take the union across drugs and count
+    OncoKB genes. Preserves pool composition and the number of picks per drug."""
+    rng = np.random.default_rng(seed)
+    onc = {g.upper() for g in oncokb_genes}
+
+    bm = biomarkers.assign(Gene=biomarkers["Gene"].astype(str).str.upper())
+    bm = bm[bm["Drug"].isin(candidate_pools)]
+    n_per_drug = bm.groupby("Drug")["Gene"].nunique()
+    k_obs = len(set(bm["Gene"]) & onc)
+
+    pools, picks = [], []
+    for d, n in n_per_drug.items():
+        pool = np.array(sorted({g.upper() for g in candidate_pools[d]}))
+        pools.append(pool); picks.append(min(int(n), len(pool)))
+
+    onc_arr = np.array(sorted(onc))
+    null = np.empty(n_perm, dtype=int)
+    for b in range(n_perm):
+        drawn = np.unique(np.concatenate(
+            [rng.choice(p, size=m, replace=False) for p, m in zip(pools, picks)]
+        ))
+        null[b] = np.isin(drawn, onc_arr).sum()
+
+    mean = float(null.mean())
+    return {
+        "k_observed": k_obs, "null_mean": mean, "null_sd": float(null.std()),
+        "fold_vs_null": (k_obs / mean) if mean > 0 else float("nan"),
+        "empirical_p": float((1 + (null >= k_obs).sum()) / (1 + n_perm)),
+        "n_perm": n_perm,
+    }
+
+def print_enrichment_results(label: str, res: dict, null: dict = None):
     print("\n" + "=" * 70)
-    print("🧬 ONCOKB ENRICHMENT TEST")
+    print(f"ONCOKB ENRICHMENT — {label}")
     print("=" * 70)
-
-    print(f"Total genes in universe (N):     {res['N_total_genes']}")
-    print(f"OncoKB genes in universe (K):    {res['K_oncokb_genes']}")
-    print(f"Biomarker genes (n):             {res['n_biomarkers']}")
-    print(f"Observed overlap (k):            {res['k_overlap']}")
-
-    print("\n--- Expectation under randomness ---")
-    print(f"Expected overlap:                {res['expected_overlap']:.2f}")
-    print(f"Enrichment fold:                {res['enrichment_fold']:.2f}x")
-
-    print("\n--- Statistical significance ---")
-    print(f"p-value:                        {res['p_value']:.2e}")
-
-    print("\nInterpretation:")
-    if res["p_value"] < 1e-5:
-        print("✔ Strong enrichment for known cancer genes (highly significant)")
-    elif res["p_value"] < 0.01:
-        print("✔ Moderate enrichment")
-    else:
-        print("⚠ Not strongly significant")
+    print(f"Universe (candidate genes offered, N):  {res['N_total_genes']}")
+    print(f"OncoKB genes in universe (K):           {res['K_oncokb_genes']}")
+    print(f"Biomarker genes (n):                    {res['n_biomarkers']}")
+    print(f"Observed overlap (k):                   {res['k_overlap']}")
+    print(f"Expected overlap:                       {res['expected_overlap']:.1f}")
+    print(f"Enrichment fold (hypergeometric):       {res['enrichment_fold']:.2f}x")
+    print(f"p-value (hypergeometric):               {res['p_value']:.2e}")
+    if null:
+        print(f"Drug-aware permutation null:            mean {null['null_mean']:.1f} "
+              f"± {null['null_sd']:.1f}  ->  {null['fold_vs_null']:.2f}x, "
+              f"empirical p = {null['empirical_p']:.4f} ({null['n_perm']} perms)")
+    print("Note: descriptive annotation; candidates are cancer-curated by design.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -1703,13 +1692,7 @@ def main():
         pd.to_pickle(hallmark, hallmark_cache)
 
     # ── Drug response ─────────────────────────────────────────────────────────
-    drug_response = (
-        pd.concat([gdsc1, gdsc2], ignore_index=True)
-        [["COSMIC_ID", "DRUG_NAME", "LN_IC50", "PATHWAY_NAME", "PUTATIVE_TARGET"]]
-        .dropna(subset=["COSMIC_ID", "DRUG_NAME", "LN_IC50"])
-        .groupby(["COSMIC_ID", "DRUG_NAME"], as_index=False)
-        .agg({"LN_IC50": "mean", "PATHWAY_NAME": "first", "PUTATIVE_TARGET": "first"})
-    )
+    drug_response = build_drug_response(gdsc1, gdsc2)
 
     auto_msig_mapping = {
         p: find_msigdb_matches(p, hallmark)
@@ -1828,21 +1811,27 @@ def main():
     oncokb_csv_path=os.path.join(CFG["data_dir"], "cancerGeneList.tsv"),
     output_dir=CFG["output_dir"]
 )
-    oncokb = pd.read_csv(
-        os.path.join(CFG["data_dir"], "cancerGeneList.tsv"),
-        sep="\t"
-    )
-    biomarkers = pd.read_csv(
-        os.path.join(CFG["output_dir"], "biomarker_summary.csv")
-    )
+    oncokb = pd.read_csv(os.path.join(CFG["data_dir"], "cancerGeneList.tsv"), sep="\t")
+    bm = pd.read_csv(os.path.join(CFG["output_dir"], "biomarker_summary.csv"))
+    bm["Gene"] = bm["Gene"].astype(str).str.upper()
 
-    res = compute_oncokb_enrichment(
-        expr=expr,
-        biomarkers=biomarkers,
-        oncokb_genes=oncokb["Hugo Symbol"]
-    )
+    # Candidate pool each drug's models were actually offered
+    expr_set = set(expr.index.astype(str))
+    pools = {
+        d: select_genes(drug_to_pathway[d], drug_to_target.get(d, ""),
+                        expr_set, hallmark, auto_msig_mapping, CFG)[0]
+        for d in bm["Drug"].unique()
+    }
+    universe = set().union(*pools.values())
 
-    print_enrichment_results(res)
+    groups = {
+        "Model-based": bm[bm["Importance_Method"] != "Pearson"],
+        "Pearson":     bm[bm["Importance_Method"] == "Pearson"],
+    }
+    for label, sub in groups.items():
+        res  = compute_oncokb_enrichment(universe, sub["Gene"], oncokb["Hugo Symbol"])
+        null = oncokb_permutation_null(pools, sub, oncokb["Hugo Symbol"])
+        print_enrichment_results(label, res, null)
 
     non_dummy_cv  = cv_results_df[cv_results_df["Model"] != "Dummy"]
     best_per_drug = (
@@ -1866,13 +1855,8 @@ def main():
     plot_figure2d(cv_results_df, drug_list, CFG)
 
     # ── Figures 2E–2H ─────────────────────────────────────────────────────────
-    non_dummy_results = results_df[results_df["Model"] != "Dummy"]
-    best_test_r2 = (
-        non_dummy_results
-        .loc[non_dummy_results.groupby("Drug")["R2"].idxmax()]
-        .sort_values("R2", ascending=False)
-        .head(10)
-    )
+    non_dummy_results = results_df[results_df["Selected"]]
+    best_test_r2 = non_dummy_results.sort_values("R2", ascending=False).head(10)
     top_drugs = best_test_r2["Drug"].tolist()
     top_drugs = [d for d in top_drugs if d in all_predictions]
 
