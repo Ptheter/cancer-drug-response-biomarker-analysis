@@ -1553,20 +1553,16 @@ def validate_known_biomarkers(
     overlap_pct = (known_genes / total_genes * 100) if total_genes > 0 else 0
 
     top_known = (
-    biomarkers[biomarkers["In_OncoKB"]]
-    .groupby(["Importance_Method", "Gene"])
-    .agg(
-        Mean_Importance=("Importance_Score", "mean"),
-        Num_Drugs=("Drug", "nunique"),
-        Num_Pathways=("Pathway", "nunique")
+        biomarkers[biomarkers["In_OncoKB"]]
+        .groupby(["Importance_Method", "Gene"])
+        .agg(
+            Mean_Importance=("Importance_Score", "mean"),
+            Num_Drugs=("Drug", "nunique"),
+            Num_Pathways=("Pathway", "nunique")
+        )
+        .sort_values(["Importance_Method", "Mean_Importance"], ascending=[True, False])
+        .reset_index()
     )
-    .sort_values(["Importance_Method", "Mean_Importance"], ascending=[True, False])
-    .reset_index()
-)
-
-    print("\nTop recovered known cancer genes (Pearson):")
-    if len(top_known) > 0:
-        print(top_known[top_known["Importance_Method"] == "Pearson"].head(15))
 
     # save outputs
     overlap_file = os.path.join(output_dir, "known_cancer_gene_overlap.csv")
@@ -1584,9 +1580,9 @@ def validate_known_biomarkers(
     print(f"Not in OncoKB:                 {novel_genes}")
     print(f"In OncoKB (descriptive only):  {overlap_pct:.2f}%")
 
-    print("\nTop recovered known cancer genes:")
+    print("\nTop recovered known cancer genes (Pearson):")
     if len(top_known) > 0:
-        print(top_known.head(15))
+        print(top_known[top_known["Importance_Method"] == "Pearson"].head(15))
 
     print("\nSaved files:")
     print(f"- {overlap_file}")
@@ -1720,9 +1716,6 @@ def main():
     drug_to_target  = dict(zip(drug_meta["DRUG_NAME"], drug_meta["target"]))
 
     log.info(f"Total drugs: {len(drug_list)}")
-
-    # temporal test
-    drug_list = drug_list[:4]
 
     # ── Cache-aware dispatch ──────────────────────────────────────────────────
     to_run, cached = [], {}
