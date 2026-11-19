@@ -110,6 +110,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 
+from reference_data import (TARGET_TO_GENES, SKIP_WORDS, PATHWAY_TO_GENES,
+                            FALLBACK_GENES, STOP_WORDS, CLASS_COLORS)
+
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -168,298 +171,27 @@ Path(CFG["output_dir"]).mkdir(parents=True, exist_ok=True)
 Path(os.path.join(CFG["output_dir"], "cache")).mkdir(parents=True, exist_ok=True)
 Path(os.path.join(CFG["output_dir"], "biomarker")).mkdir(parents=True, exist_ok=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STATIC REFERENCE TABLES
-# ══════════════════════════════════════════════════════════════════════════════
-
-TARGET_TO_GENES = {
-    "EGFR":         ["EGFR"],
-    "ERBB2":        ["ERBB2"],
-    "ERBB3":        ["ERBB3"],
-    "MET":          ["MET"],
-    "ALK":          ["ALK"],
-    "ROS1":         ["ROS1"],
-    "RET":          ["RET"],
-    "KIT":          ["KIT"],
-    "FLT3":         ["FLT3"],
-    "AXL":          ["AXL"],
-    "VEGFR":        ["KDR", "FLT1", "FLT4"],
-    "PDGFR":        ["PDGFRA", "PDGFRB"],
-    "CSF1R":        ["CSF1R"],
-    "FGFR":         ["FGFR1", "FGFR2", "FGFR3", "FGFR4"],
-    "FGFR1":        ["FGFR1"],
-    "FGFR2":        ["FGFR2"],
-    "FGFR3":        ["FGFR3"],
-    "IGF1R":        ["IGF1R"],
-    "IR":           ["INSR"],
-    "Ephrins":      ["EPHA2", "EPHB4"],
-    "BRAF":         ["BRAF"],
-    "RAF":          ["RAF1", "BRAF", "ARAF"],
-    "MEK1":         ["MAP2K1"],
-    "MEK2":         ["MAP2K2"],
-    "ERK1":         ["MAPK3"],
-    "ERK2":         ["MAPK1"],
-    "KRAS":         ["KRAS"],
-    "NRAS":         ["NRAS"],
-    "HRAS":         ["HRAS"],
-    "MTORC1":       ["MTOR", "RPTOR", "MLST8"],
-    "MTORC2":       ["MTOR", "RICTOR", "MLST8"],
-    "MTOR":         ["MTOR"],
-    "PI3K":         ["PIK3CA", "PIK3CB", "PIK3CD", "PIK3CG"],
-    "PI3Kalpha":    ["PIK3CA"],
-    "PI3Kdelta":    ["PIK3CD"],
-    "AKT1":         ["AKT1"],
-    "AKT2":         ["AKT2"],
-    "AKT3":         ["AKT3"],
-    "PTEN":         ["PTEN"],
-    "PDK1":         ["PDPK1"],
-    "S6K":          ["RPS6KB1", "RPS6KB2"],
-    "CDK1":         ["CDK1"],
-    "CDK2":         ["CDK2"],
-    "CDK4":         ["CDK4"],
-    "CDK5":         ["CDK5"],
-    "CDK6":         ["CDK6"],
-    "CDK7":         ["CDK7"],
-    "CDK9":         ["CDK9"],
-    "PKC":          ["PRKCA", "PRKCB", "PRKCG", "PRKCD"],
-    "PLK1":         ["PLK1"],
-    "PLK2":         ["PLK2"],
-    "PLK3":         ["PLK3"],
-    "AURKA":        ["AURKA"],
-    "AURKB":        ["AURKB"],
-    "AURKC":        ["AURKC"],
-    "WEE1":         ["WEE1"],
-    "CHK1":         ["CHEK1"],
-    "CHK2":         ["CHEK2"],
-    "BCL2":         ["BCL2"],
-    "BCLXL":        ["BCL2L1"],
-    "BCL-XL":       ["BCL2L1"],
-    "MCL1":         ["MCL1"],
-    "BAX":          ["BAX"],
-    "BAK":          ["BAK1"],
-    "PARP1":        ["PARP1"],
-    "PARP2":        ["PARP2"],
-    "ATM":          ["ATM"],
-    "ATR":          ["ATR"],
-    "DNA-PK":       ["PRKDC"],
-    "TOP1":         ["TOP1"],
-    "TOP2":         ["TOP2A", "TOP2B"],
-    "BRCA1":        ["BRCA1"],
-    "BRCA2":        ["BRCA2"],
-    "HDAC":         ["HDAC1", "HDAC2", "HDAC3", "HDAC6", "HDAC8"],
-    "HDAC1":        ["HDAC1"],
-    "HDAC2":        ["HDAC2"],
-    "HDAC3":        ["HDAC3"],
-    "HDAC6":        ["HDAC6"],
-    "EZH2":         ["EZH2"],
-    "SMYD2":        ["SMYD2"],
-    "DOT1L":        ["DOT1L"],
-    "LSD1":         ["KDM1A"],
-    "BRD4":         ["BRD4"],
-    "BRD2":         ["BRD2"],
-    "BRD3":         ["BRD3"],
-    "PRMT5":        ["PRMT5"],
-    "CBP":          ["CREBBP"],
-    "EP300":        ["EP300"],
-    "Proteasome":   ["PSMA1", "PSMB5", "PSMB8", "PSMB9"],
-    "CAPN1":        ["CAPN1"],
-    "HSP90":        ["HSP90AA1", "HSP90AB1"],
-    "MDM2":         ["MDM2"],
-    "Microtubule stabiliser": ["TUBB1", "TUBB2A", "TUBB3", "TUBA1A", "TUBA1B"],
-    "Microtubule":  ["TUBB1", "TUBB2A", "TUBB3", "TUBA1A"],
-    "KIF11":        ["KIF11"],
-    "ROCK1":        ["ROCK1"],
-    "ROCK2":        ["ROCK2"],
-    "PAK":          ["PAK1", "PAK2", "PAK4"],
-    "LIMK":         ["LIMK1", "LIMK2"],
-    "ABL":          ["ABL1", "ABL2"],
-    "BCR-ABL":      ["ABL1", "BCR"],
-    "SRC":          ["SRC"],
-    "LCK":          ["LCK"],
-    "FYN":          ["FYN"],
-    "BMX":          ["BMX"],
-    "ITK":          ["ITK"],
-    "JAK1":         ["JAK1"],
-    "JAK2":         ["JAK2"],
-    "JAK3":         ["JAK3"],
-    "STAT3":        ["STAT3"],
-    "RSK2":         ["RPS6KA3"],
-    "RSK":          ["RPS6KA1", "RPS6KA3"],
-    "p38":          ["MAPK14", "MAPK11"],
-    "JNK":          ["MAPK8", "MAPK9", "MAPK10"],
-    "GSK3":         ["GSK3A", "GSK3B"],
-    "TTK":          ["TTK"],
-    "DHFR":         ["DHFR"],
-    "Dihydrofolate reductase (DHFR)": ["DHFR"],
-    "IDH1":         ["IDH1"],
-    "IDH2":         ["IDH2"],
-    "FASN":         ["FASN"],
-    "NAMPT":        ["NAMPT"],
-    "SMO":          ["SMO"],
-    "TNKS":         ["TNKS", "TNKS2"],
-    "PORCN":        ["PORCN"],
-    "p53":          ["TP53"],
-    "TP53":         ["TP53"],
-    "MDM4":         ["MDM4"],
-    "gamma-secretase": ["PSEN1", "PSEN2", "APH1A", "NCSTN"],
-    "FEN1":         ["FEN1"],
-    "TERT":         ["TERT"],
-    "XIAP":         ["XIAP"],
-}
-
-SKIP_WORDS = {
-    "others", "other", "various", "unknown", "inhibitor",
-    "kinase", "pathway", "signaling", "and", "the", "of",
-}
-
-PATHWAY_TO_GENES = {
-    "ERK MAPK signaling": [
-        "KRAS","NRAS","HRAS","BRAF","RAF1","MAP2K1","MAP2K2",
-        "MAPK1","MAPK3","DUSP6","SPRY2","ETV4","CCND1","MYC",
-        "EGFR","SOS1","GRB2","RPS6KA1",
-    ],
-    "EGFR signaling": [
-        "EGFR","ERBB2","ERBB3","ERBB4","KRAS","NRAS","PIK3CA",
-        "PIK3R1","PTEN","AKT1","AKT2","MTOR","MAP2K1","MAPK1",
-        "MAPK3","MET","IGF1R","SRC","STAT3","CCND1","MYC",
-    ],
-    "RTK signaling": [
-        "KDR","FLT1","FLT4","PDGFRA","PDGFRB","KIT","FLT3",
-        "MET","RET","NTRK1","EGFR","ERBB2","PIK3CA","AKT1",
-        "MTOR","KRAS","MAPK1","STAT3","JAK2","SRC",
-    ],
-    "PI3K/MTOR signaling": [
-        "PIK3CA","PIK3CB","PIK3CD","PTEN","AKT1","AKT2","AKT3",
-        "MTOR","RPS6KB1","EIF4EBP1","TSC1","TSC2","KRAS",
-        "EGFR","PDPK1","SGK1","RICTOR","RPTOR",
-    ],
-    "Cell cycle": [
-        "CCND1","CCND2","CCND3","CDK4","CDK6","CDK2","CDK1",
-        "RB1","CDKN2A","CDKN1A","CDKN1B","E2F1","MYC","TP53",
-        "CCNE1","CDC25A","WEE1","CHEK1","CHEK2",
-    ],
-    "Apoptosis regulation": [
-        "BCL2","BCL2L1","BCL2L11","BAX","BAK1","MCL1",
-        "BID","PMAIP1","TP53","MYC","CDKN1A","CASP3",
-        "CASP9","APAF1","DIABLO","XIAP",
-    ],
-    "Chromatin histone acetylation": [
-        "HDAC1","HDAC2","HDAC3","HDAC6","HDAC8",
-        "EP300","CREBBP","KAT2A","KAT2B","MYC",
-        "BCL2","TP53","CDKN1A","BRD4",
-    ],
-    "Chromatin histone methylation": [
-        "EZH2","EZH1","SUZ12","EED","KDM1A","KDM5C",
-        "SETD2","KMT2A","KMT2D","DOT1L","SMYD2",
-        "MYC","TP53","CDKN2A","PRMT5",
-    ],
-    "Chromatin other": [
-        "SMARCA4","SMARCB1","ARID1A","ARID2","PBRM1",
-        "BRD4","BRD2","BRD3","MYC","TP53","CCND1",
-        "CREBBP","EP300",
-    ],
-    "DNA replication": [
-        "TP53","BRCA1","BRCA2","ATM","ATR","CHEK1","CHEK2",
-        "MLH1","MSH2","MSH6","ERCC1","ERCC2","RAD51",
-        "FANCA","FANCD2","MDM2","CDKN1A","BCL2",
-        "PARP1","TOP1","TOP2A","PRKDC",
-    ],
-    "Genome integrity": [
-        "BRCA1","BRCA2","ATM","ATR","CHEK1","CHEK2",
-        "RAD51","FANCA","FANCD2","PALB2","PARP1",
-        "TP53","MDM2","RB1","PRKDC","XRCC1",
-    ],
-    "Mitosis": [
-        "TUBB1","TUBB2A","TUBB2B","TUBB3","TUBB4A",
-        "TUBA1A","TUBA1B","BCL2","BCL2L1","BAX",
-        "TP53","CDKN1A","AURKA","AURKB","PLK1",
-        "CCNB1","CDC20","BUB1","MAD2L1","KIF11",
-    ],
-    "Cytoskeleton": [
-        "TUBB1","TUBB3","TUBA1A","ACTB","ACTN1",
-        "VIM","MYH9","ROCK1","ROCK2","CDC42",
-        "RAC1","RHOA","PAK1","LIMK1","LIMK2",
-    ],
-    "Protein stability and degradation": [
-        "PSMA1","PSMB5","PSMB8","PSMB9","NFE2L2",
-        "KEAP1","SQSTM1","UBB","UBC","HSP90AA1",
-        "HSP90AB1","HSPA1A","MYC","TP53","MDM2",
-    ],
-    "p53 pathway": [
-        "TP53","MDM2","MDM4","CDKN1A","BAX","BBC3",
-        "PMAIP1","ATM","CHEK1","CHEK2","RB1",
-        "CCND1","CDK4","E2F1","CDKN2A",
-    ],
-    "ABL signaling": [
-        "ABL1","ABL2","BCR","CRKL","GRB2","SOS1",
-        "KRAS","MAPK1","STAT5A","STAT5B","PIK3CA",
-        "AKT1","MYC","SRC",
-    ],
-    "IGF1R signaling": [
-        "IGF1R","IGF1","IGF2","IGFBP3","IRS1","IRS2",
-        "PIK3CA","AKT1","MTOR","MAPK1","MAPK3",
-        "KRAS","MYC","INSR",
-    ],
-    "JNK and p38 signaling": [
-        "MAP3K1","MAP3K5","MAP2K4","MAP2K7","MAPK8",
-        "MAPK9","MAPK14","MAPK11","MAP2K3","MAP2K6",
-        "TP53","BCL2","MYC","DUSP1",
-    ],
-    "WNT signaling": [
-        "CTNNB1","APC","AXIN1","AXIN2","GSK3B",
-        "DVL1","FZD1","LRP5","LRP6","TCF7L2",
-        "MYC","CCND1","MMP7","TNKS","PORCN",
-    ],
-    "Hormone-related": [
-        "ESR1","ESR2","AR","PGR","FOXA1",
-        "GATA3","RB1","CCND1","CDK4","CDK6",
-        "PIK3CA","AKT1","MTOR","NCOR1",
-    ],
-    "Metabolism": [
-        "IDH1","IDH2","LDHA","PKM","HK2",
-        "SLC2A1","MYC","HIF1A","PRKAA1","MTOR",
-        "PIK3CA","AKT1","FASN","NAMPT","DHFR",
-    ],
-}
-
-FALLBACK_GENES = [
-    "TP53","MYC","KRAS","PIK3CA","PTEN","AKT1","MTOR",
-    "CCND1","CDK4","BCL2","RB1","EGFR","BRAF","NRAS",
-    "BRCA1","BRCA2","ATM","MAPK1","CDKN2A","MDM2",
-]
-
-CLASS_COLORS = {
-    "ERK MAPK signaling":               "#378ADD",
-    "EGFR signaling":                   "#1D9E75",
-    "RTK signaling":                    "#EF9F27",
-    "PI3K/MTOR signaling":              "#D4537E",
-    "Cell cycle":                       "#D85A30",
-    "Apoptosis regulation":             "#85B7EB",
-    "Chromatin histone acetylation":    "#F0997B",
-    "Chromatin histone methylation":    "#9FE1CB",
-    "Chromatin other":                  "#AFA9EC",
-    "DNA replication":                  "#888780",
-    "Genome integrity":                 "#BA7517",
-    "Mitosis":                          "#639922",
-    "Cytoskeleton":                     "#97C459",
-    "Protein stability and degradation":"#7F77DD",
-    "p53 pathway":                      "#534AB7",
-    "ABL signaling":                    "#5DCAA5",
-    "IGF1R signaling":                  "#FAC775",
-    "JNK and p38 signaling":            "#F0997B",
-    "WNT signaling":                    "#ED93B1",
-    "Hormone-related":                  "#D4537E",
-    "Metabolism":                       "#639922",
-}
-
-STOP_WORDS = {"SIGNALING","PATHWAY","REGULATION","OTHER","AND","OF","THE","KINASES"}
-
 TREE_MODELS   = {"XGBoost", "RandomForest"}
 LINEAR_MODELS = {"Linear", "Lasso", "ElasticNet"}
 BASE_MODELS = ["Linear", "Lasso", "ElasticNet", "RandomForest", "XGBoost"]
 MODEL_ORDER = [f"{b}-{i}" for b in BASE_MODELS for i in ("Raw", "PCA")]
 BASELINES   = {"Dummy", "TissueMean"}
 
+class TissueMeanRegressor(RegressorMixin, BaseEstimator):
+    """Predict the training mean LN_IC50 of the sample's tissue
+    (global training mean for tissues unseen in training).
+    X is a single column of tissue labels, not gene expression."""
+
+    def fit(self, X, y):
+        tissues = np.asarray(X).ravel()
+        s = pd.Series(np.asarray(y, dtype=float), index=tissues)
+        self.global_mean_ = float(s.mean())
+        self.means_ = s.groupby(level=0).mean().to_dict()
+        return self
+
+    def predict(self, X):
+        return np.array([self.means_.get(t, self.global_mean_)
+                         for t in np.asarray(X).ravel()], dtype=float)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -1036,7 +768,7 @@ def plot_figure2b(best_pos, cfg):
 
 
 def plot_figure2c(cv_df, cfg):
-    non_dummy = ~cv_df["Model"].isin(BASELINES)
+    non_dummy = cv_df[~cv_df["Model"].isin(BASELINES)]
     pivot = (non_dummy.groupby(["Pathway", "Model"])["CV_R2_mean"].mean()
              .reset_index()
              .pivot(index="Pathway", columns="Model", values="CV_R2_mean"))
@@ -1226,7 +958,7 @@ def plot_figure2g(strat_df: pd.DataFrame, cfg: dict):
 
 
 def plot_figure2h(cv_df: pd.DataFrame, cfg: dict):
-    non_dummy   = ~cv_df["Model"].isin(BASELINES)
+    non_dummy = cv_df[~cv_df["Model"].isin(BASELINES)]
     model_order = [m for m in MODEL_ORDER if m in non_dummy["Model"].unique()]
 
     pivot = (non_dummy.groupby(["Drug", "Model"])["CV_R2_mean"].mean()
