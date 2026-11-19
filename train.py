@@ -124,6 +124,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
@@ -192,6 +193,7 @@ class TissueMeanRegressor(RegressorMixin, BaseEstimator):
     def predict(self, X):
         return np.array([self.means_.get(t, self.global_mean_)
                          for t in np.asarray(X).ravel()], dtype=float)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -988,141 +990,6 @@ def plot_figure2h(cv_df: pd.DataFrame, cfg: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# P3 — BIOMARKER DISCOVERY
-# ══════════════════════════════════════════════════════════════════════════════
-
-def plot_volcano(drug_name: str, drug_response: pd.DataFrame,
-                 expr: pd.DataFrame, cfg: dict):
-    """Pearson r vs –log10(p) across all genes for one drug."""
-    drug_df    = drug_response[drug_response["DRUG_NAME"] == drug_name]
-    drug_df    = drug_df[["COSMIC_ID", "LN_IC50"]].dropna()
-    common_ids = list(set(expr.columns).intersection(set(drug_df["COSMIC_ID"])))
-    if len(common_ids) < 50:
-        return
-
-    X_full = expr[common_ids].T.copy()
-    X_full.columns = X_full.columns.astype(str)
-    X_full = X_full.loc[:, ~X_full.columns.duplicated()]
-    X_full = X_full.loc[:, X_full.columns != "nan"]
-
-    drug_indexed = (
-        drug_df
-        .assign(COSMIC_ID=drug_df["COSMIC_ID"].astype(str))
-        .drop_duplicates("COSMIC_ID")
-        .set_index("COSMIC_ID")
-    )
-    y_series  = drug_indexed.reindex(X_full.index.astype(str))["LN_IC50"]
-    valid_mask = y_series.notna().values
-    X_full    = X_full.iloc[valid_mask]
-    y         = y_series.values[valid_mask].astype(float)
-
-    rows = []
-    for gene in X_full.columns:
-        try:
-            x_vals = X_full[gene].values.astype(float)
-            # drop positions where either x or y is NaN/inf
-            mask = np.isfinite(x_vals) & np.isfinite(y)
-            if mask.sum() < 10:   # need at least 10 valid pairs
-                continue
-            result = pearsonr(x_vals[mask], y[mask])
-            r = float(result.statistic if hasattr(result, "statistic") else result[0])
-            p = float(result.pvalue    if hasattr(result, "pvalue")    else result[1])
-            if not (np.isfinite(r) and np.isfinite(p)):
-                continue
-        except Exception as e:
-            continue
-        rows.append({"gene": gene, "r": r, "p": p})
-
-    corr_df = pd.DataFrame(rows)
-    corr_df["-log10p"] = -np.log10(corr_df["p"].clip(lower=1e-300))
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(corr_df["r"], corr_df["-log10p"],
-               c=np.where(corr_df["r"] > 0, "#378ADD", "#D85A30"),
-               alpha=0.4, s=8, linewidths=0)
-    ax.axhline(-np.log10(0.05), color="grey", ls="--", lw=0.8, label="p=0.05")
-    ax.axvline(0, color="black", lw=0.5)
-    ax.set_xlabel("Pearson r (gene expression vs LN_IC50)")
-    ax.set_ylabel("–log₁₀(p-value)")
-    ax.set_title(f"Volcano plot — {drug_name}")
-
-    top = corr_df.nlargest(10, "-log10p")
-    for _, row in top.iterrows():
-        ax.text(row["r"], row["-log10p"], row["gene"],
-                fontsize=6, ha="left", va="bottom")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    safe = re.sub(r"[^\w\-]", "_", drug_name)
-    save_fig(fig, f"biomarker/volcano_{safe}.png", cfg)
-
-
-def plot_importance_clustermap(drug_name: str, imp_df: pd.DataFrame,
-                                drug_response: pd.DataFrame, expr: pd.DataFrame,
-                                cfg: dict):
-    """Clustermap of top-N important genes × LN_IC50 Pearson correlation matrix.
-    Uses XGB/RF importance ranking to select genes; correlation computed genome-wide."""
-    # Pick top genes from the best available importance method
-    for method in ["XGB_importance", "RF_importance", "Permutation", "Pearson"]:
-        drug_imp = imp_df[
-            (imp_df["Drug"] == drug_name) & (imp_df["Method"] == method)
-        ].head(cfg["imp_top_n"])
-        if not drug_imp.empty:
-            break
-
-    if drug_imp.empty:
-        return
-
-    top_genes  = drug_imp["Gene"].tolist()
-    drug_df    = drug_response[drug_response["DRUG_NAME"] == drug_name]
-    drug_df    = drug_df[["COSMIC_ID", "LN_IC50"]].dropna()
-    common_ids = list(set(expr.columns).intersection(set(drug_df["COSMIC_ID"])))
-    if len(common_ids) < 50:
-        return
-
-    X_full = expr[common_ids].T.copy()
-    X_full.columns = X_full.columns.astype(str)
-    X_full = X_full.loc[:, ~X_full.columns.duplicated()]
-    X_full = X_full.loc[:, X_full.columns != "nan"]
-
-    drug_indexed = (
-        drug_df
-        .set_index("COSMIC_ID")
-        .loc[~drug_df.set_index("COSMIC_ID").index.duplicated(keep="first")]
-    )
-    y_series = drug_indexed.reindex(X_full.index.astype(int))["LN_IC50"]
-    valid_mask = y_series.notna().values
-    X_full = X_full.iloc[valid_mask]
-    y = y_series.values[valid_mask]
-
-    avail  = [g for g in top_genes if g in X_full.columns]
-    if len(avail) < 3:
-        return
-
-    corr_data             = X_full[avail].copy().astype(float)
-    corr_data["LN_IC50"] = y
-    corr_matrix           = corr_data.corr()
-
-    try:
-        g = sns.clustermap(
-            corr_matrix, cmap="RdBu_r", center=0,
-            figsize=(max(6, len(avail) * 0.5 + 1),
-                     max(6, len(avail) * 0.5 + 1)),
-            annot=(len(avail) <= 12), fmt=".2f",
-            annot_kws={"size": 7},
-        )
-        g.fig.suptitle(
-            f"Top-{cfg['imp_top_n']} gene correlation ({method}) — {drug_name}", y=1.01
-        )
-        safe = re.sub(r"[^\w\-]", "_", drug_name)
-        path = os.path.join(cfg["output_dir"], f"biomarker/clustermap_{safe}.png")
-        g.savefig(path, dpi=600, bbox_inches="tight")
-        plt.close(g.fig)
-        log.info(f"Saved {path}")
-    except Exception as e:
-        log.warning(f"Clustermap failed for {drug_name}: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # BIOMARKER EXPORT
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1379,7 +1246,7 @@ def oncokb_permutation_null(candidate_pools: dict, biomarkers: pd.DataFrame,
 
     mean = float(null.mean())
     return {
-        "k_observed": k_obs, "null_mean": mean, "null_sd": float(null.std()),
+        "k_observed": k_obs, "null_counts": null.tolist(), "null_mean": mean, "null_sd": float(null.std()),
         "fold_vs_null": (k_obs / mean) if mean > 0 else float("nan"),
         "empirical_p": float((1 + (null >= k_obs).sum()) / (1 + n_perm)),
         "n_perm": n_perm,
@@ -1572,6 +1439,8 @@ def main():
         res  = compute_oncokb_enrichment(universe, sub["Gene"], oncokb["Hugo Symbol"])
         null = oncokb_permutation_null(pools, sub, oncokb["Hugo Symbol"])
         print_enrichment_results(label, res, null)
+        with open(os.path.join(CFG["output_dir"], f"oncokb_null_{label}.json"), "w") as f:
+            json.dump({"label": label, **null}, f)
 
     non_dummy_cv = cv_results_df[~cv_results_df["Model"].isin(BASELINES)]
     best_per_drug = (
@@ -1608,12 +1477,6 @@ def main():
 
     plot_figure2g(strat_df, CFG)
     plot_figure2h(cv_results_df, CFG)
-
-    # ── P3: Biomarker plots for top-10 drugs ──────────────────────────────────
-    for drug_name in best_pos.head(10)["Drug"].tolist():
-        plot_volcano(drug_name, drug_response, expr, CFG)
-        if not imp_df.empty:
-            plot_importance_clustermap(drug_name, imp_df, drug_response, expr, CFG)
 
     log.info("Done. All outputs saved.")
 
