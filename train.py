@@ -98,6 +98,7 @@ from matplotlib.patches import Patch
 from scipy.stats import pearsonr
 from scipy.stats import hypergeom
 from joblib import Parallel, delayed
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.decomposition import PCA
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -455,6 +456,9 @@ STOP_WORDS = {"SIGNALING","PATHWAY","REGULATION","OTHER","AND","OF","THE","KINAS
 
 TREE_MODELS   = {"XGBoost", "RandomForest"}
 LINEAR_MODELS = {"Linear", "Lasso", "ElasticNet"}
+BASE_MODELS = ["Linear", "Lasso", "ElasticNet", "RandomForest", "XGBoost"]
+MODEL_ORDER = [f"{b}-{i}" for b in BASE_MODELS for i in ("Raw", "PCA")]
+BASELINES   = {"Dummy", "TissueMean"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -494,27 +498,35 @@ def make_pca_pipeline(n_features: int, n_train: int, cfg: dict) -> Pipeline:
     n_comp = max(cfg["pca_min"], min(cfg["pca_max"], n_features, n_train - 1))
     return Pipeline([("scaler", StandardScaler()), ("pca", PCA(n_components=n_comp))])
 
-
-def build_model_dict(cfg: dict) -> dict:
+def build_estimators(cfg: dict) -> dict:
+    """Fresh, unfitted estimators (call again for a second set)."""
     alphas = np.logspace(*cfg["alpha_log_range"])
     return {
-        "Dummy":       (DummyRegressor(strategy="mean"), True),
-        "Linear":      (LinearRegression(), True),
-        "Lasso":       (LassoCV(alphas=alphas, cv=cfg["n_splits"],
-                                max_iter=cfg["max_iter"], precompute=False), True),
-        "ElasticNet":  (ElasticNetCV(l1_ratio=cfg["l1_ratios"], alphas=alphas,
+        "Linear":       LinearRegression(),
+        "Lasso":        LassoCV(alphas=alphas, cv=cfg["n_splits"],
+                                max_iter=cfg["max_iter"], precompute=False),
+        "ElasticNet":   ElasticNetCV(l1_ratio=cfg["l1_ratios"], alphas=alphas,
                                      cv=cfg["n_splits"], max_iter=cfg["max_iter"],
-                                     precompute=False), True),
-        "RandomForest":(RandomForestRegressor(n_estimators=200, min_samples_leaf=5,
+                                     precompute=False),
+        "RandomForest": RandomForestRegressor(n_estimators=200, min_samples_leaf=5,
                                               max_features="sqrt",
                                               random_state=cfg["random_state"],
-                                              n_jobs=1), False),
-        "XGBoost":     (XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=4,
+                                              n_jobs=1),
+        "XGBoost":      XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=4,
                                      subsample=0.8, colsample_bytree=0.8,
                                      reg_alpha=0.1, reg_lambda=1.0,
                                      random_state=cfg["random_state"],
-                                     verbosity=0, n_jobs=1), False),
+                                     verbosity=0, n_jobs=1),
     }
+
+def build_model_specs(cfg: dict) -> list:
+    """[(label, base_name, input_type, estimator), ...] — every model under
+    both representations, plus the mean-predicting Dummy baseline."""
+    specs = [("Dummy", "Dummy", "Raw", DummyRegressor(strategy="mean"))]
+    for inp in ("Raw", "PCA"):
+        for base, est in build_estimators(cfg).items():
+            specs.append((f"{base}-{inp}", base, inp, est))
+    return specs
 
 def select_genes(pathway_name, target_str, available, hallmark, auto_mapping, cfg):
     """Candidate genes offered to the models for one drug.
@@ -761,7 +773,14 @@ def run_drug(
 
     X = X_full[avail_genes].values.astype(np.float32)
 
-    # ── Split once. Test set is used ONLY for final reporting (FIX 2) ─────────
+    # Tissue label per sample, for the TissueMean baseline (None if no annotation)
+    X_tissue = None
+    if cell_tissue is not None:
+        ct = cell_tissue[~cell_tissue.index.duplicated(keep="first")]
+        tis = ct.reindex(pd.Series(common_ids)).fillna("Unknown").astype(str).values
+        X_tissue = tis.reshape(-1, 1)
+
+    # ── Split once; test set used only for final reporting ────────────────────
     idx = np.arange(len(common_ids))
     idx_train, idx_test = train_test_split(
         idx, test_size=cfg["test_size"], random_state=cfg["random_state"]
@@ -772,81 +791,75 @@ def run_drug(
 
     n_comp = pca_n_components(X_train.shape[1], X_train.shape[0], cfg)
     kf     = KFold(n_splits=cfg["n_splits"], shuffle=True, random_state=cfg["random_state"])
-    models = build_model_dict(cfg)
 
     result_rows, cv_rows, imp_rows, strat_rows, pi_rows = [], [], [], [], []
-    best_cv, best_name, best_pipe, best_preds = -np.inf, None, None, None
+    best_cv, best = -np.inf, None          # best = (label, base, pipe, preds)
 
-    for model_name, (estimator, use_pca) in models.items():
-        pipe = build_pipeline(estimator, use_pca, n_comp)
-
-        # CV on the TRAINING split only -> model selection never sees test data
+    def _score_and_log(label, base, inp, est_or_pipe, Xtr, Xte, n_genes):
+        """CV on the training split, then one fit + test evaluation."""
         cv = cross_validate(
-            pipe, X_train, y_train, cv=kf,
+            est_or_pipe, Xtr, y_train, cv=kf,
             scoring={"r2": "r2", "mse": "neg_mean_squared_error"},
         )
-        cv_r2   = cv["test_r2"]
-        cv_rmse = np.sqrt(-cv["test_mse"])
-
-        cv_rows.append({
-            "Drug": drug_name, "Pathway": pathway_name,
-            "Model": model_name, "Input": "PCA" if use_pca else "Raw",
-            "N_Genes": len(avail_genes),
-            "CV_R2_mean": float(cv_r2.mean()), "CV_R2_std": float(cv_r2.std()),
-            "CV_RMSE_mean": float(cv_rmse.mean()), "CV_RMSE_std": float(cv_rmse.std()),
-        })
-
-        pipe.fit(X_train, y_train)
-        preds = pipe.predict(X_test)
-        r2    = r2_score(y_test, preds)
+        cv_r2, cv_rmse = cv["test_r2"], np.sqrt(-cv["test_mse"])
+        est_or_pipe.fit(Xtr, y_train)
+        preds = est_or_pipe.predict(Xte)
+        r2    = float(r2_score(y_test, preds))
         rmse  = float(np.sqrt(mean_squared_error(y_test, preds)))
+        common = {"Drug": drug_name, "Pathway": pathway_name, "Model": label,
+                  "Base_Model": base, "Input": inp, "N_Genes": n_genes}
+        cv_rows.append({**common,
+                        "CV_R2_mean": float(cv_r2.mean()), "CV_R2_std": float(cv_r2.std()),
+                        "CV_RMSE_mean": float(cv_rmse.mean()), "CV_RMSE_std": float(cv_rmse.std())})
+        result_rows.append({**common, "R2": r2, "RMSE": rmse, "Selected": False})
+        log.info(f"  {label:18s} | CV R²={cv_r2.mean():.3f} ± {cv_r2.std():.3f} | Test R²={r2:.3f}")
+        return float(cv_r2.mean()), preds
 
-        result_rows.append({
-            "Drug": drug_name, "Pathway": pathway_name,
-            "Model": model_name, "Input": "PCA" if use_pca else "Raw",
-            "N_Genes": len(avail_genes), "R2": float(r2), "RMSE": rmse,
-            "Selected": False,
-        })
-        log.info(f"  {model_name:12s} [{'PCA' if use_pca else 'Raw':3s}] | "
-                 f"CV R²={cv_r2.mean():.3f} ± {cv_r2.std():.3f} | Test R²={r2:.3f}")
+    # ── Gene-based models, both representations ───────────────────────────────
+    for label, base, inp, estimator in build_model_specs(cfg):
+        pipe = build_pipeline(estimator, inp == "PCA", n_comp)
+        cv_mean, preds = _score_and_log(label, base, inp, pipe, X_train, X_test,
+                                        len(avail_genes))
+        # choose by CV R²; baselines are never eligible
+        if base not in BASELINES and cv_mean > best_cv:
+            best_cv, best = cv_mean, (label, base, pipe, preds)
 
-        # FIX 2: choose by CV R² (not test R²)
-        if model_name != "Dummy" and cv_r2.mean() > best_cv:
-            best_cv, best_name, best_pipe, best_preds = (
-                float(cv_r2.mean()), model_name, pipe, preds
-            )
+    # ── Tissue-mean baseline (reported, never selected) ───────────────────────
+    if X_tissue is not None:
+        _score_and_log("TissueMean", "TissueMean", "Tissue", TissueMeanRegressor(),
+                       X_tissue[idx_train], X_tissue[idx_test], 0)
 
+    best_label = best[0] if best else None
     for row in result_rows:
-        row["Selected"] = bool(row["Model"] == best_name)
+        row["Selected"] = bool(row["Model"] == best_label)
 
-    # ── Feature importance — always in GENE space (FIX 1) ─────────────────────
+    # ── Feature importance — always in gene space ─────────────────────────────
+    best_pipe = best[2] if best else None
+    best_base = best[1] if best else None
+    best_preds = best[3] if best else None
     if best_pipe is not None:
-        if best_name in TREE_MODELS:
+        if best_base in TREE_MODELS:
             imp_local = compute_tree_importance(best_pipe.named_steps["model"], avail_genes)
-            method    = "XGB_importance" if best_name == "XGBoost" else "RF_importance"
+            method    = "XGB_importance" if best_base == "XGBoost" else "RF_importance"
         else:
-            # whole pipeline (scaler + PCA + model) is permuted on raw genes
             imp_local = compute_permutation_imp(best_pipe, X_test, y_test, avail_genes, cfg)
             method    = "Permutation"
-
-        # Descriptive Pearson r(gene, LN_IC50) on raw expression, all samples
         corr_local = compute_correlation_importance(X, y, avail_genes)
 
         for rank, row in enumerate(imp_local.itertuples(index=False)):
             imp_rows.append({
-                "Drug": drug_name, "Pathway": pathway_name, "Model": best_name,
+                "Drug": drug_name, "Pathway": pathway_name, "Model": best_label,
                 "Method": method, "Gene": row.gene,
                 "Importance": float(row.importance), "Rank": rank + 1,
             })
         for rank, row in enumerate(corr_local.itertuples(index=False)):
             imp_rows.append({
-                "Drug": drug_name, "Pathway": pathway_name, "Model": best_name,
+                "Drug": drug_name, "Pathway": pathway_name, "Model": best_label,
                 "Method": "Pearson", "Gene": row.gene,
                 "Importance": float(row.importance), "Rank": rank + 1,
                 "r": float(row.r),
             })
 
-    # ── Stratified R² / prediction intervals use the CV-selected model ────────
     if best_preds is not None and cell_tissue is not None:
         strat_rows = stratified_r2(best_preds, y_test, test_ids, cell_tissue, drug_name, cfg)
     if best_pipe is not None:
@@ -1023,12 +1036,11 @@ def plot_figure2b(best_pos, cfg):
 
 
 def plot_figure2c(cv_df, cfg):
-    non_dummy = cv_df[cv_df["Model"] != "Dummy"]
+    non_dummy = ~cv_df["Model"].isin(BASELINES)
     pivot = (non_dummy.groupby(["Pathway", "Model"])["CV_R2_mean"].mean()
              .reset_index()
              .pivot(index="Pathway", columns="Model", values="CV_R2_mean"))
-    col_order = [c for c in ["Linear", "Lasso", "ElasticNet", "RandomForest", "XGBoost"]
-                 if c in pivot.columns]
+    col_order = [c for c in MODEL_ORDER if c in pivot.columns]
     pivot = pivot[col_order].loc[pivot.mean(axis=1).sort_values(ascending=False).index]
     fig, ax = plt.subplots(figsize=(10, max(6, len(pivot) * 0.55)))
     sns.heatmap(pivot, annot=True, fmt=".2f", cmap="RdYlBu_r",
@@ -1042,10 +1054,8 @@ def plot_figure2c(cv_df, cfg):
 
 
 def plot_figure2d(cv_df, drug_list, cfg):
-    models_to_plot = [m for m in
-                      ["Dummy", "Linear", "Lasso", "ElasticNet", "RandomForest", "XGBoost"]
-                      if m in cv_df["Model"].unique()]
-    x, width = np.arange(len(drug_list)), 0.13
+    models_to_plot = [m for m in ["Dummy", "TissueMean"] + MODEL_ORDER if m in cv_df["Model"].unique()]
+    x, width = np.arange(len(drug_list)), 0.8 / len(models_to_plot)
     fig, ax = plt.subplots(figsize=(max(18, len(drug_list) * 0.55), 6))
     for i, mname in enumerate(models_to_plot):
         subset = cv_df[cv_df["Model"] == mname].set_index("Drug").reindex(drug_list)
@@ -1216,9 +1226,8 @@ def plot_figure2g(strat_df: pd.DataFrame, cfg: dict):
 
 
 def plot_figure2h(cv_df: pd.DataFrame, cfg: dict):
-    non_dummy   = cv_df[cv_df["Model"] != "Dummy"]
-    model_order = [m for m in ["Linear", "Lasso", "ElasticNet", "RandomForest", "XGBoost"]
-                   if m in non_dummy["Model"].unique()]
+    non_dummy   = ~cv_df["Model"].isin(BASELINES)
+    model_order = [m for m in MODEL_ORDER if m in non_dummy["Model"].unique()]
 
     pivot = (non_dummy.groupby(["Drug", "Model"])["CV_R2_mean"].mean()
              .reset_index()
@@ -1236,7 +1245,7 @@ def plot_figure2h(cv_df: pd.DataFrame, cfg: dict):
             marker="o", ms=7, label="Median across drugs", zorder=5)
 
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(model_order, fontsize=10)
+    ax.set_xticklabels(model_order, fontsize=10, rotation=30)
     ax.axhline(0, color="black", lw=0.8, ls="--")
     ax.set_ylabel("CV R² (mean)")
     ax.set_title("Figure 2H — Model comparison across all drugs\n"
@@ -1832,7 +1841,7 @@ def main():
         null = oncokb_permutation_null(pools, sub, oncokb["Hugo Symbol"])
         print_enrichment_results(label, res, null)
 
-    non_dummy_cv  = cv_results_df[cv_results_df["Model"] != "Dummy"]
+    non_dummy_cv = cv_results_df[~cv_results_df["Model"].isin(BASELINES)]
     best_per_drug = (
         non_dummy_cv
         .loc[non_dummy_cv.groupby("Drug")["CV_R2_mean"].idxmax()]
