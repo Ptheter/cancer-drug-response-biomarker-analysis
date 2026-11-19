@@ -25,3 +25,7 @@ Thumbs.db
 
 # Generated analysis outputs
 outputs/
+
+# Run leftovers
+nohup.out
+results_old/

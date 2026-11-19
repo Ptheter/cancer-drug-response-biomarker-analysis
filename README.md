@@ -2,194 +2,139 @@
 
 ## Overview
 
-This project investigates whether gene expression profiles can predict cancer cell-line sensitivity to anti-cancer drugs and identify genes associated with drug response.
+This project asks whether gene-expression profiles of cancer cell lines can predict sensitivity to anti-cancer drugs, and which genes are associated with that response.
 
-Using gene expression and drug-response data from the Genomics of Drug Sensitivity in Cancer (GDSC) datasets, I developed a machine learning pipeline to predict drug sensitivity measured by **LN(IC50)** across hundreds of compounds.
+Using the Genomics of Drug Sensitivity in Cancer (GDSC) datasets, I built a machine learning pipeline that predicts drug sensitivity, measured as LN(IC50), for 464 drug–screen units. It combines predictive modeling, feature-importance analysis, and a statistical check of the identified genes against known cancer genes.
 
-The project combines predictive modeling, feature importance analysis, and biological interpretation to explore potential molecular biomarkers associated with drug sensitivity.
+Headline findings:
+
+- Gene expression carries real but modest predictive signal: median held-out R² of 0.157.
+- Within individual tissue types, predictive performance is near zero or negative, which suggests much of the pooled signal reflects differences between tissues.
+- An apparent ~4× enrichment of identified biomarkers for known cancer genes disappears under a fair null model (see [OncoKB comparison](#oncokb-comparison)).
 
 ## Research Objectives
 
-- Predict drug response from cancer cell-line gene expression profiles.
-- Compare the performance of multiple regression models.
-- Identify genes associated with drug sensitivity across different compounds.
-- Investigate pathway-level patterns among identified biomarkers.
-- Examine differences in predictive performance across cancer tissue types.
-- Compare discovered biomarkers with known cancer-associated genes.
+1. Predict drug response from cancer cell-line gene expression.
+2. Compare several regression models using a leakage-free evaluation.
+3. Identify genes associated with drug response across compounds.
+4. Examine pathway-level patterns among identified genes.
+5. Examine predictive performance within individual cancer tissue types.
+6. Compare identified genes with known cancer genes, using an appropriate null.
 
 ## Dataset
 
-The analysis integrates:
+| Data | Description |
+|---|---|
+| Gene expression | RMA-normalized basal expression, 17,419 genes × 1,018 cell lines (GDSC) |
+| Drug response | GDSC1 and GDSC2 fitted dose-response (LN_IC50) |
+| Cell-line metadata | Tissue (OncoTree lineage) annotations |
+| Cancer gene reference | OncoKB cancer gene list |
 
-- **Gene expression:** Basal gene expression profiles from cancer cell lines.
-- **Drug response:** GDSC1 and GDSC2 drug sensitivity measurements.
-- **Cell-line metadata:** Tissue and cell-line annotations.
-- **Cancer gene reference:** Known cancer-associated genes used for biological comparison.
+GDSC1 and GDSC2 use different assays and drug panels, so they are analyzed **separately**. Each (drug, screen) pair is one analysis unit, e.g. `Erlotinib [GDSC2]`. This gives 468 units, of which 464 had enough cell lines (≥ 200) to model. Units are not fully independent: the same drug can appear in both screens.
 
-Approximate project scale:
-
-- ~1,000 cancer cell lines
-- ~17,000 gene-expression features
-- 363 anti-cancer compounds
-
-See [`data/README.md`](data/README.md) for dataset sources and setup instructions.
+See `data/README.md` for sources and setup.
 
 ## Methodology
 
-### 1. Data preprocessing
+### 1. Features
+For each drug, the models see only a drug-specific **candidate gene set**, not all 17k genes. It is built from the drug's annotated targets, curated gene lists for its pathway, and MSigDB Hallmark sets matched to that pathway. If fewer than 8 candidate genes are present in the expression data, a fixed list of 20 well-known cancer genes is used instead. Candidate sets are built without using drug-response values.
 
-- Loaded and integrated gene expression and drug-response datasets.
-- Matched cell lines across expression and drug-response records.
-- Prepared gene-expression features and drug-specific response targets.
-- Used LN(IC50) as the regression target.
+### 2. Models
+Linear Regression, Lasso, ElasticNet, Random Forest, XGBoost, and a mean-predicting Dummy baseline. Each model is a single scikit-learn `Pipeline` that takes the raw gene matrix:
 
-### 2. Machine learning models
+- Linear models and the Dummy baseline: standardization → PCA (up to 50 components) → model.
+- Random Forest and XGBoost: standardization → model.
 
-Evaluated the following models:
+### 3. Evaluation protocol
+- A single 80/20 train/test split per drug (fixed random seed).
+- 5-fold cross-validation **on the training split only**. Scaling and PCA are fitted inside each fold, so there is no preprocessing leakage.
+- The best non-dummy model per drug is chosen by **CV R²**. Test-set R² is reported afterwards and is never used for selection.
+- Metrics: R², RMSE.
 
-- Linear Regression
-- Lasso Regression
-- ElasticNet
-- Random Forest
-- XGBoost
-- Dummy Regression baseline
-
-Linear models and the dummy baseline were evaluated using PCA-transformed features. Random Forest and XGBoost were evaluated using standardized gene-expression features without PCA.
-
-### 3. Model evaluation
-
-- Five-fold cross-validation
-- R²
-- Root Mean Squared Error (RMSE)
-- Predicted-versus-actual analysis
-- Model comparisons across individual drugs
-
-The best-performing non-dummy model was identified separately for each drug based on cross-validation R².
-
-### 4. Biomarker discovery
-
-- Feature importance analysis
-- Pearson correlation analysis
-- Gene-level biomarker summaries
-- Pathway-level analysis
-- Tissue-specific performance analysis
-- Comparison against known cancer-associated genes
+### 4. Biomarker analysis
+- Feature importance for the selected model, always in gene space: built-in importance for tree models, permutation importance on the full pipeline for linear models.
+- Pearson correlation between each candidate gene and LN_IC50 (descriptive, all samples; positive r = higher expression with higher IC50, i.e. resistance).
+- Gene-level and pathway-level summaries, and tissue-stratified performance.
 
 ## Results
 
 ### Predictive performance
+Across 464 drug–screen units:
 
-Across 363 drugs:
+- Median best-model **CV R²: 0.146** (mean 0.164).
+- Median selected-model **test R²: 0.157** (mean 0.162); 444 of 464 units (95.7%) were above zero.
 
-- **361 of 363 drugs (99.45%)** had a positive cross-validation R² for their best-performing non-dummy model.
-- Median best-model cross-validation R²: **0.169**
-- Mean best-model cross-validation R²: **0.179**
+Gene expression contains predictive information about drug response, but a typical drug is only weakly predictable. Each estimate comes from one train/test split, so small differences between drugs should not be over-interpreted.
 
-The results indicate that gene expression contains predictive information for drug response, although predictive performance varies substantially across compounds. The median R² indicates that there is considerable room for improvement.
+### Frequently selected genes
+Genes most often among a drug's top-20 features, counted over drug–screen units:
 
-### Frequently identified biomarkers
+| Gene | Units |
+|---|---|
+| TP53 | 198 |
+| MYC | 192 |
+| CCND1 | 134 |
+| EGFR | 132 |
+| MAPK1 | 114 |
+| KRAS | 114 |
+| BCL2 | 105 |
+| MTOR | 89 |
+| PIK3CA | 89 |
+| AKT1 | 84 |
 
-| Gene | Number of drug associations |
-|---|---:|
-| TP53 | 155 |
-| MYC | 146 |
-| EGFR | 98 |
-| CCND1 | 98 |
-| KRAS | 90 |
-| MAPK1 | 88 |
-| MTOR | 71 |
-| PIK3CA | 71 |
-| AKT1 | 69 |
-| BCL2 | 66 |
+These counts largely reflect how many drugs' candidate gene sets contain each gene (TP53 and MYC appear in many pathway lists). They are not evidence of independent biological importance, and they are associations, not causal effects.
 
-These counts represent the number of drug-specific biomarker associations in the analysis, not independent experimental validations.
+### Pathway-level summary
+Pathways with the most biomarker associations: PI3K/mTOR signaling (2,440), RTK signaling (2,120), DNA replication (1,400), cell cycle (1,236), ERK/MAPK (1,010), apoptosis regulation (1,000), and mitosis (980). These totals scale with the number of drugs mapped to each pathway, so they describe where the analysis had the most data, not which pathways matter most.
 
-### Pathway-level findings
+### OncoKB comparison
+Candidate genes come from curated cancer pathway lists, so they are enriched for known cancer genes by construction. Testing biomarkers against all ~17k expressed genes would therefore overstate enrichment. Instead I tested against the pool of **1,452 candidate genes** actually offered to the models (306 of them in OncoKB):
 
-Frequently represented pathways included:
+| Biomarker set | Genes | Overlap with OncoKB | Hypergeometric fold | Drug-aware permutation null |
+|---|---|---|---|---|
+| Model-based importance | 919 | 250 | 1.29× | 0.93× (empirical p = 1.0) |
+| Pearson | 721 | 226 | 1.49× | 0.84× (empirical p = 1.0) |
 
-- PI3K/MTOR signaling
-- Receptor tyrosine kinase (RTK) signaling
-- DNA replication
-- Cell-cycle regulation
-- ERK/MAPK signaling
-- Apoptosis regulation
+The permutation null redraws genes from each drug's own candidate pool, preserving pool composition and the number of picks per drug (2,000 permutations). Under this null, the identified biomarkers are **not enriched** for known cancer genes beyond what the candidate lists already contain. Overlap with OncoKB is descriptive context, not independent validation of predictive or therapeutic utility.
 
-These findings highlight the relevance of signaling, proliferation, and cell-survival pathways in the drug-response analysis.
-
-### OncoKB Cancer Gene Enrichment
-
-To assess whether identified biomarkers were enriched for known cancer-associated genes, we performed a one-sided hypergeometric enrichment test using OncoKB.
-
-- **269 of 969** biomarker genes overlapped with OncoKB cancer genes represented in the expression dataset.
-- The observed overlap was approximately **4.39-fold higher** than expected under random sampling.
-- The enrichment was statistically significant (**p = 2.65 × 10⁻¹⁰⁶**).
-
-These findings indicate substantial overlap between the computationally identified biomarkers and established cancer-associated genes. This analysis provides external biological context but does not independently validate their predictive or therapeutic utility.
-
-### Tissue-Specific Predictive Performance
-
-Predictive performance varied across cancer tissue groups when evaluating drug–tissue combinations separately.
-
-- **Lung:** Highest mean R² (0.020), with 62.2% positive comparisons across 360 drug–tissue combinations.
-- **Bone:** 72.7% positive comparisons, although only 11 combinations were available.
-- **Lymphoid:** 39.2% positive comparisons across 360 combinations.
-- **Myeloid:** Lowest mean R² (-0.472).
-- **Peripheral Nervous System:** Mean R² of -0.415, with only 28 comparisons.
-
-Overall, tissue-stratified results suggest that the relationship between gene expression and drug response varies across cancer types. However, most tissue groups had negative mean R² values, and sample sizes varied substantially. These findings should therefore be interpreted cautiously.
+### Tissue-specific performance
+Models were trained across all tissues, then scored within each tissue on the held-out test set (14 tissue groups). Mean within-tissue R² was near zero or negative for nearly every tissue: Lung was highest (0.007; 55% of drug–tissue comparisons positive) and Myeloid lowest (−0.397). Pooled test R² is positive (median 0.157), so a substantial part of the predictive signal may reflect differences *between* tissue types rather than variation *within* a tissue. This has not been tested directly (see [Future Improvements](#future-improvements)). Groups with very few comparisons (e.g. Pancreas, n = 7; Bone, n = 17) are not interpretable, and per-tissue R² on small test subsets is noisy and biased downward.
 
 ## Visualizations
+`results/figures/` contains:
 
-The [`results/figures`](results/figures/) directory contains figures illustrating:
+- Figure 2A–2D: CV R² distribution, drugs ranked by performance, pathway × model heatmap, model comparison across drugs
+- Figure 2E: predicted vs. actual LN_IC50 for top drugs, colored by tissue
+- Figure 2F: feature importance for the top drug
+- Figure 2G–2H: tissue-stratified R² heatmap, model comparison summary
+- `biomarker/`: volcano plots and gene-correlation clustermaps for the ten best-performing drugs
 
-- Cross-validation R² distributions
-- Drug-level predictive performance
-- Pathway-level model comparisons
-- Predicted versus actual drug response
-- Feature importance
-- Tissue-specific model performance
-
-The [`results/tables`](results/tables/) directory contains the corresponding model evaluation and biomarker summary tables.
+`results/tables/` contains the corresponding model evaluation, feature-importance, biomarker and tissue tables.
 
 ## Technologies
-
-**Programming:** Python
-
-**Data analysis:** NumPy, Pandas, SciPy
-
-**Machine learning:** Scikit-learn, XGBoost
-
-**Dimensionality reduction:** PCA
-
-**Visualization:** Matplotlib, Seaborn
-
-**Statistical analysis:** Pearson correlation, feature importance, enrichment analysis
+Python · NumPy, Pandas, SciPy · scikit-learn, XGBoost · Matplotlib, Seaborn
 
 ## Repository Structure
-
-```text
+```
 cancer-drug-response-biomarker-analysis/
 ├── train.py
 ├── requirements.txt
 ├── README.md
 ├── data/
-│   └── README.md
+│   └── README.md        # raw data not included
 └── results/
     ├── figures/
     └── tables/
 ```
 
 ## Reproducing the Analysis
-
 1. Clone the repository.
-2. Install the required Python dependencies.
-3. Obtain the datasets listed in `data/README.md`.
-4. Place the required files in the `data/` directory.
-5. Run the pipeline.
+2. Install dependencies.
+3. Obtain the datasets listed in `data/README.md` and place them in `data/`.
+4. Run the pipeline.
 
 ```bash
-git clone YOUR_REPOSITORY_URL
+git clone <repository-url>
 cd cancer-drug-response-biomarker-analysis
 
 python -m venv .venv
@@ -199,19 +144,4 @@ pip install -r requirements.txt
 python train.py
 ```
 
-The pipeline generates model evaluation tables, biomarker summaries, visualizations, and cached intermediate files in `outputs/`.
-
-## Limitations
-
-- Predictive performance varies across drugs, with a modest median cross-validation R².
-- Gene-expression associations do not establish causal relationships with drug sensitivity.
-- Identified biomarkers require independent experimental or clinical validation.
-- The model comparison uses different preprocessing strategies for linear and tree-based models, so it is not a fully factorial comparison of every model under both feature representations.
-
-## Future Improvements
-
-- Benchmark all models using both PCA and standardized raw gene-expression features.
-- Incorporate additional molecular data, such as mutation and copy-number profiles.
-- Explore alternative feature selection and dimensionality reduction methods.
-- Validate candidate biomarkers using independent datasets.
-- Develop more robust drug-response prediction models.
+The first run needs internet access to download Hallmark gene sets (cached afterwards). A full run took about 35 minutes on 8 CPU cores. Results are cached per drug in `outputs/cache/`, so an interrupted run resumes where it stopped; delete that folder after changing the modeling code.
