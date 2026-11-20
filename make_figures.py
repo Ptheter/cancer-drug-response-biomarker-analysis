@@ -286,52 +286,78 @@ def gene_associations(X, y, groups=None):
 
 
 # ── 7. Biomarker panels: volcano (pooled), volcano (tissue-adjusted), top genes ──
+def _spread_labels(ax, pts, toward_right):
+    """Label (x, y, name) points without overlap: stack the labels at least
+    `gap` apart vertically, offset sideways, and join each to its point."""
+    if not pts:
+        return
+    pts = sorted(pts, key=lambda t: -t[1])
+    y0, y1 = ax.get_ylim()
+    x0, x1 = ax.get_xlim()
+    gap = 0.06 * (y1 - y0)
+    dx = (0.10 if toward_right else -0.10) * (x1 - x0)
+    prev = None
+    for x, y, name in pts:
+        ty = y if prev is None else min(y, prev - gap)
+        prev = ty
+        ax.annotate(name, (x, y), xytext=(x + dx, ty), textcoords="data",
+                    fontsize=8, va="center", ha="left" if toward_right else "right",
+                    arrowprops=dict(arrowstyle="-", lw=0.5, color="#888888",
+                                    shrinkA=0, shrinkB=2))
+
+
 def fig_biomarker_panels(drug, X, y, groups, out, q_thr=0.05, r_thr=0.2,
-                         n_label=8, n_bars=12):
+                         n_label=5, n_bars=12):
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    C_WITHIN = PAL[2]
     naive = gene_associations(X, y)
     adj = gene_associations(X, y, groups)
 
-    fig, axes = plt.subplots(1, 3, figsize=(17, 4.9),
-                             gridspec_kw={"width_ratios": [1, 1, 0.85]})
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5.0),
+                             gridspec_kw={"width_ratios": [1, 1, 0.9]})
     for ax, df, title in [(axes[0], naive, "All cell lines pooled"),
                           (axes[1], adj, "Within tissue (tissue-adjusted)")]:
         ylog = -np.log10(df.q.clip(lower=1e-300))
         hit = (df.q < q_thr) & (df.r.abs() >= r_thr)
-        ax.scatter(df.r[~hit], ylog[~hit], s=6, alpha=0.3, color=C_DUMMY, linewidths=0)
         pos, neg = hit & (df.r > 0), hit & (df.r < 0)
-        ax.scatter(df.r[pos], ylog[pos], s=10, alpha=0.8, color=C_TISSUE, linewidths=0,
-                   label="higher expr = more resistant")
-        ax.scatter(df.r[neg], ylog[neg], s=10, alpha=0.8, color=C_MODEL, linewidths=0,
-                   label="higher expr = more sensitive")
+        ax.scatter(df.r[~hit], ylog[~hit], s=6, alpha=0.3, color=C_DUMMY, linewidths=0)
+        ax.scatter(df.r[pos], ylog[pos], s=10, alpha=0.8, color=C_TISSUE, linewidths=0)
+        ax.scatter(df.r[neg], ylog[neg], s=10, alpha=0.8, color=C_MODEL, linewidths=0)
         ax.axhline(-np.log10(q_thr), color="grey", ls="--", lw=0.8)
         for v in (-r_thr, r_thr):
             ax.axvline(v, color="grey", ls=":", lw=0.8)
-        for _, row in df[hit].reindex(df[hit].r.abs().sort_values(ascending=False).index) \
-                            .head(n_label).iterrows():
-            ax.annotate(row.gene, (row.r, -np.log10(max(row.q, 1e-300))), fontsize=7,
-                        xytext=(3, 2), textcoords="offset points")
-        ax.set_title(f"{title}\n{int(hit.sum())} of {len(df):,} genes: FDR q<{q_thr}, |r|≥{r_thr}",
-                     fontsize=10)
+        ax.margins(x=0.18)
+        d = df.assign(ylog=ylog)
+        left = d[neg].reindex(d[neg].r.abs().sort_values(ascending=False).index).head(n_label)
+        right = d[pos].reindex(d[pos].r.abs().sort_values(ascending=False).index).head(n_label)
+        _spread_labels(ax, list(zip(left.r, left.ylog, left.gene)), toward_right=True)
+        _spread_labels(ax, list(zip(right.r, right.ylog, right.gene)), toward_right=False)
+        ax.set_title(f"{title}\n{int(hit.sum()):,} of {len(df):,} genes: "
+                     f"FDR q<{q_thr}, |r|≥{r_thr}", fontsize=10)
         ax.set_xlabel("Pearson r with LN(IC50)")
     axes[0].set_ylabel("−log10 FDR q-value")
-    axes[0].legend(fontsize=7, loc="upper center", bbox_to_anchor=(1.1, -0.17),
-                   ncol=2, frameon=False)
 
     m = naive.merge(adj, on="gene", suffixes=("_pooled", "_within"))
     top = m.reindex(m.r_within.abs().sort_values(ascending=False).index).head(n_bars).iloc[::-1]
     y_pos = np.arange(len(top))
-    axes[2].barh(y_pos + 0.2, top.r_pooled, height=0.38, color=C_DUMMY, label="pooled")
-    axes[2].barh(y_pos - 0.2, top.r_within, height=0.38, color=C_MODEL, label="within tissue")
+    axes[2].barh(y_pos + 0.2, top.r_pooled, height=0.38, color=C_DUMMY)
+    axes[2].barh(y_pos - 0.2, top.r_within, height=0.38, color=C_WITHIN)
     axes[2].set_yticks(y_pos); axes[2].set_yticklabels(top.gene, fontsize=8)
     axes[2].axvline(0, color="black", lw=0.7)
     axes[2].set_xlabel("Pearson r  (← sensitive | resistant →)")
     axes[2].set_title(f"Top {n_bars} genes by within-tissue |r|", fontsize=10)
-    axes[2].legend(fontsize=8, frameon=False, loc="upper center",
-                   bbox_to_anchor=(0.5, -0.17), ncol=2)
 
+    handles = [
+        Line2D([], [], marker="o", ls="", color=C_TISSUE, label="higher expression = more resistant"),
+        Line2D([], [], marker="o", ls="", color=C_MODEL, label="higher expression = more sensitive"),
+        Patch(color=C_DUMMY, label="r, all cell lines pooled"),
+        Patch(color=C_WITHIN, label="r, within tissue"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=9, frameon=False)
     fig.suptitle(f"Gene–response associations: {short(drug)}  (n = {len(y)} cell lines)",
-                 y=1.03, fontsize=12, fontweight="bold")
-    fig.tight_layout()
+                 fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=[0, 0.07, 1, 0.95])
     safe = re.sub(r"[^\w\-]", "_", drug)
     save(fig, os.path.join(out, "biomarker"), f"biomarker_{safe}.png")
 
