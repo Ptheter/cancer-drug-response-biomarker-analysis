@@ -1,0 +1,7 @@
+Drug,n_cell_lines,n_genes_tested,hits_pooled,hits_within_tissue
+Nutlin-3a (-) [GDSC2],940,17419,2721,58
+Venetoclax [GDSC2],930,17419,4536,242
+AZD5991 [GDSC2],711,17419,4531,315
+ABT737 [GDSC2],929,17419,3962,564
+Navitoclax [GDSC2],939,17419,3633,708
+alpha-lipoic acid [GDSC2],731,17419,3011,41

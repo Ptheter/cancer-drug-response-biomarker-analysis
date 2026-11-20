@@ -307,7 +307,7 @@ def _spread_labels(ax, pts, toward_right):
 
 
 def fig_biomarker_panels(drug, X, y, groups, out, q_thr=0.05, r_thr=0.2,
-                         n_label=5, n_bars=12):
+                         n_label=3, n_bars=12, n_table=20):
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     C_WITHIN = PAL[2]
@@ -361,6 +361,22 @@ def fig_biomarker_panels(drug, X, y, groups, out, q_thr=0.05, r_thr=0.2,
     safe = re.sub(r"[^\w\-]", "_", drug)
     save(fig, os.path.join(out, "biomarker"), f"biomarker_{safe}.png")
 
+    # tables for the README / downstream use
+    rows = []
+    sig = m[m.q_within < q_thr]
+    for direction, sub in [("resistance", sig[sig.r_within > 0]),
+                           ("sensitivity", sig[sig.r_within < 0])]:
+        sub = sub.reindex(sub.r_within.abs().sort_values(ascending=False).index).head(n_table)
+        for rank, row in enumerate(sub.itertuples(index=False), start=1):
+            rows.append({"Drug": drug, "Direction": direction, "Rank": rank,
+                         "Gene": row.gene, "r_within_tissue": row.r_within,
+                         "q_within_tissue": row.q_within,
+                         "r_pooled": row.r_pooled, "q_pooled": row.q_pooled})
+    counts = {"Drug": drug, "n_cell_lines": len(y), "n_genes_tested": len(naive),
+              "hits_pooled": int(((naive.q < q_thr) & (naive.r.abs() >= r_thr)).sum()),
+              "hits_within_tissue": int(((adj.q < q_thr) & (adj.r.abs() >= r_thr)).sum())}
+    return rows, counts
+
 
 # ── 8. One concrete biomarker, expression vs response ────────────────────────
 def fig_biomarker_example(drug, gene, X, y, groups, out, top_tissues=6):
@@ -394,6 +410,8 @@ def main():
     ap.add_argument("--out", default="results/figures")
     ap.add_argument("--drug", default=None, help="drug for the biomarker example")
     ap.add_argument("--gene", default=None, help="gene for the biomarker example")
+    ap.add_argument("--tables", default="results/tables",
+                    help="where to write biomarker_top_genes.csv and biomarker_hit_counts.csv")
     ap.add_argument("--n-biomarker-drugs", type=int, default=6,
                     help="number of top drugs to get gene-association panels")
     a = ap.parse_args()
@@ -417,10 +435,21 @@ def main():
     tis = load_tissue(a.data)
     ranked = res[res.Selected].sort_values("R2", ascending=False).Drug.tolist()
 
+    top_rows, count_rows = [], []
     for d in ranked[:a.n_biomarker_drugs]:
         fr = drug_frame(d, expr, tis, a.data)
         if fr is not None:
-            fig_biomarker_panels(d, *fr, a.out)
+            rows, counts = fig_biomarker_panels(d, *fr, a.out)
+            top_rows += rows
+            count_rows.append(counts)
+    if top_rows:
+        os.makedirs(a.tables, exist_ok=True)
+        pd.DataFrame(top_rows).to_csv(os.path.join(a.tables, "biomarker_top_genes.csv"),
+                                      index=False)
+        pd.DataFrame(count_rows).to_csv(os.path.join(a.tables, "biomarker_hit_counts.csv"),
+                                        index=False)
+        print("saved", os.path.join(a.tables, "biomarker_top_genes.csv"),
+              "and biomarker_hit_counts.csv")
 
     drug = a.drug or ranked[0]
     pe = imp[(imp.Drug == drug) & (imp.Method == "Pearson")].sort_values("Rank")
