@@ -461,7 +461,8 @@ def fig_external(outputs, out, min_units=20):
     ax.set_ylabel("Model vs PRISM (external)")
     ax.set_title(f"{screens[0]}: each point is a drug\n"
                  f"correlation across drugs = {r_across:+.2f}", fontsize=10, pad=14)
-    ax.legend(fontsize=8, loc="lower right", frameon=False)
+    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+            ncol=1, frameon=False, markerscale=1.5)
 
     fig.suptitle("External validation: GDSC-trained models on held-out cell lines, scored against PRISM",
                  y=1.04, fontsize=12, fontweight="bold")
