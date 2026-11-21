@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from scipy.stats import pearsonr, wilcoxon
+from scipy.stats import pearsonr, spearmanr, wilcoxon
 
 BASELINES   = ["Dummy", "TissueMean"]
 BASE_MODELS = ["Linear", "Lasso", "ElasticNet", "RandomForest", "XGBoost"]
@@ -307,7 +307,7 @@ def _spread_labels(ax, pts, toward_right):
 
 
 def fig_biomarker_panels(drug, X, y, groups, out, q_thr=0.05, r_thr=0.2,
-                         n_label=3, n_bars=12, n_table=20):
+                         n_label=2, n_bars=12, n_table=20):
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     C_WITHIN = PAL[2]
@@ -403,6 +403,72 @@ def fig_biomarker_example(drug, gene, X, y, groups, out, top_tissues=6):
     save(fig, out, "fig7_biomarker_example.png")
 
 
+# ── 8. External validation on PRISM ──────────────────────────────────────────
+def fig_external(outputs, out, min_units=20):
+    path = os.path.join(outputs, "external_validation.csv")
+    if not os.path.exists(path):
+        print("skip external figure: outputs/external_validation.csv not found"); return
+    ev = pd.read_csv(path)
+    counts = ev.groupby("screen").unit.nunique().sort_values(ascending=False)
+    screens = [sc for sc in counts.index if counts[sc] >= min_units][:2]
+    if not screens:
+        print("skip external figure: no PRISM screen with enough units"); return
+
+    cols = [("rho_gdsc",         "Model vs\nGDSC", C_MODEL),
+            ("rho_prism",        "Model vs\nPRISM", PAL[2]),
+            ("rho_tissue_prism", "Tissue\nbaseline\nvs PRISM", C_TISSUE),
+            ("rho_assay",        "GDSC vs\nPRISM\n(ceiling)", C_DUMMY)]
+    fig, axes = plt.subplots(1, len(screens) + 1, figsize=(5.2 * (len(screens) + 1), 4.9),
+                             gridspec_kw={"width_ratios": [1] * len(screens) + [0.9]})
+
+    for ax, sc in zip(axes, screens):
+        d = ev[ev.screen == sc]
+        long = d.melt(value_vars=[c for c, _, _ in cols], var_name="what",
+                      value_name="rho").dropna()
+        order = [c for c, _, _ in cols]
+        sns.boxplot(data=long, x="what", y="rho", order=order, hue="what", hue_order=order,
+                    palette=[c for _, _, c in cols], showfliers=False, legend=False,
+                    width=0.6, ax=ax)
+        sns.stripplot(data=long, x="what", y="rho", order=order, color="black",
+                      alpha=0.15, size=2, jitter=0.25, ax=ax)
+        ax.axhline(0, color="black", lw=0.8, ls="--")
+        top = ax.get_ylim()[1]
+        for i, c in enumerate(order):
+            ax.text(i, top, f"{d[c].median():+.2f}", ha="center", va="bottom", fontsize=9)
+        ax.set_xticks(range(len(cols)))
+        ax.set_xticklabels([lab for _, lab, _ in cols], fontsize=9)
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.set_title(f"PRISM {sc}: {d.unit.nunique()} drug–screen units\n(median Spearman above each box)",
+                     fontsize=10, pad=14)
+    axes[0].set_ylabel("Within-drug Spearman correlation")
+
+    # per-drug: does GDSC-held-out performance predict PRISM performance?
+    ax = axes[-1]
+    d = ev[ev.screen == screens[0]].dropna(subset=["rho_gdsc", "rho_prism"])
+    beats = d.rho_prism > d.rho_tissue_prism
+    ax.scatter(d.rho_gdsc[~beats], d.rho_prism[~beats], s=14, alpha=0.6, color=C_TISSUE,
+               linewidths=0, label="tissue baseline better")
+    ax.scatter(d.rho_gdsc[beats], d.rho_prism[beats], s=14, alpha=0.6, color=PAL[2],
+               linewidths=0, label="model better")
+    lo = min(d.rho_gdsc.min(), d.rho_prism.min(), 0) - 0.03
+    hi = max(d.rho_gdsc.max(), d.rho_prism.max()) + 0.03
+    ax.plot([lo, hi], [lo, hi], "k--", lw=0.8)
+    ax.axhline(0, color="grey", lw=0.6); ax.axvline(0, color="grey", lw=0.6)
+    ax.set_xlim(lo, hi); ax.set_ylim(lo, hi); ax.set_box_aspect(1)
+    r_across = spearmanr(d.rho_gdsc, d.rho_prism)[0]
+    ax.set_xlabel("Model vs GDSC (same held-out lines)")
+    ax.set_ylabel("Model vs PRISM (external)")
+    ax.set_title(f"{screens[0]}: each point is a drug\n"
+                 f"correlation across drugs = {r_across:+.2f}", fontsize=10, pad=14)
+    ax.legend(fontsize=8, loc="lower right", frameon=False)
+
+    fig.suptitle("External validation: GDSC-trained models on held-out cell lines, scored against PRISM",
+                 y=1.04, fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    save(fig, out, "fig8_external_validation.png")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outputs", default="outputs")
@@ -428,6 +494,7 @@ def main():
     fig_top_drugs(res, a.out)
     fig_tissue(strat, a.out)
     fig_null(a.outputs, a.out)
+    fig_external(a.outputs, a.out)
 
     expr = load_expression(a.data)
     if expr is None:

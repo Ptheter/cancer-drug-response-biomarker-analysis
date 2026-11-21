@@ -168,6 +168,7 @@ Predictions transfer to an independent assay but retain only about half of their
 - `fig6_oncokb_null.png`: observed OncoKB overlap vs the drug-aware permutation null
 - `fig7_biomarker_example.png`: one gene's expression vs drug response, colored by tissue
 - `biomarker/`: per-drug gene–response associations (pooled and tissue-adjusted volcano plots, plus top genes)
+- `fig8_external_validation.png`: GDSC-trained models scored against PRISM on held-out cell lines, with the assay-agreement ceiling and tissue baseline
 
 ## Technologies
 Python · NumPy, Pandas, SciPy · scikit-learn, XGBoost · Matplotlib, Seaborn
