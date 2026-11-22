@@ -43,13 +43,13 @@
 #       - Tissue-stratified evaluation
 #       - Prediction interval estimation
 #
-# • Generates publication-style figures including:
-#       - Performance distributions
-#       - Heatmaps
-#       - Predicted vs actual scatter plots
-#       - Volcano plots
-#       - Biomarker clustermaps
-
+# • Figures and biomarker tables are produced separately by make_figures.py
+#   (reads the CSVs this script writes to /outputs)
+#
+# • Annotates biomarkers against OncoKB cancer genes:
+#       - hypergeometric test over the candidate-gene pool
+#       - drug-aware permutation null (descriptive, not validation)
+#
 # • Performs external biological validation using:
 #       - OncoKB cancer gene enrichment analysis
 #       - Statistical enrichment testing against known cancer genes
@@ -66,7 +66,7 @@
 #       feature_importance.csv
 #       stratified_r2.csv
 #       prediction_intervals.csv
-#       figure2*.png
+#       oncokb_null_*.json
 #
 # along with biomarker discovery visualizations and cached intermediate
 # results for faster reruns.
@@ -92,9 +92,6 @@ import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.patches import Patch
 from scipy.stats import pearsonr
 from scipy.stats import hypergeom
 from joblib import Parallel, delayed
@@ -105,7 +102,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression, LassoCV, ElasticNetCV
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import r2_score, mean_squared_error
-from sklearn.model_selection import KFold, cross_val_score, cross_validate, train_test_split
+from sklearn.model_selection import KFold, cross_validate, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
@@ -170,10 +167,8 @@ CFG = dict(
 
 Path(CFG["output_dir"]).mkdir(parents=True, exist_ok=True)
 Path(os.path.join(CFG["output_dir"], "cache")).mkdir(parents=True, exist_ok=True)
-Path(os.path.join(CFG["output_dir"], "biomarker")).mkdir(parents=True, exist_ok=True)
 
 TREE_MODELS   = {"XGBoost", "RandomForest"}
-LINEAR_MODELS = {"Linear", "Lasso", "ElasticNet"}
 BASE_MODELS = ["Linear", "Lasso", "ElasticNet", "RandomForest", "XGBoost"]
 MODEL_ORDER = [f"{b}-{i}" for b in BASE_MODELS for i in ("Raw", "PCA")]
 BASELINES   = {"Dummy", "TissueMean"}
@@ -227,10 +222,6 @@ def expand_with_msigdb(pathway_name, existing_genes, hallmark, auto_mapping):
         extra.extend(hallmark.get(s, []))
     return list(set(existing_genes + extra))
 
-
-def make_pca_pipeline(n_features: int, n_train: int, cfg: dict) -> Pipeline:
-    n_comp = max(cfg["pca_min"], min(cfg["pca_max"], n_features, n_train - 1))
-    return Pipeline([("scaler", StandardScaler()), ("pca", PCA(n_components=n_comp))])
 
 def build_estimators(cfg: dict) -> dict:
     """Fresh, unfitted estimators (call again for a second set)."""
@@ -673,6 +664,11 @@ def load_data(cfg: dict):
         if not os.path.exists(csv):
             pd.read_excel(xl).to_csv(csv, index=False)
 
+    n_before = expr.shape[1]
+    expr = expr.loc[:, ~expr.columns.duplicated(keep="first")]
+    if expr.shape[1] < n_before:
+        log.warning(f"Dropped {n_before - expr.shape[1]} duplicate cell-line columns")
+
     gdsc1 = pd.read_csv(f"{data_dir}/GDSC1_dose_response.csv")
     gdsc2 = pd.read_csv(f"{data_dir}/GDSC2_dose_response.csv")
 
@@ -1111,11 +1107,6 @@ def main():
     results_df = results_df.sort_values(
                 by="R2",
                 ascending=False
-    )
-    results_df.to_csv(
-        f"{out_dir}/results_test.tsv",
-        sep="\t",
-        index=False
     )
 
     cv_results_df = pd.DataFrame(all_cv)
