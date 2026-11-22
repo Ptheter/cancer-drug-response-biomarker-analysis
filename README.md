@@ -1,6 +1,5 @@
 # Cancer Drug Response Prediction and Biomarker Discovery
 
-![CI](https://github.com/<user>/<repo>/actions/workflows/ci.yml/badge.svg)
 
 ## Overview
 
@@ -8,7 +7,7 @@ This project asks whether gene-expression profiles of cancer cell lines can pred
 
 Using the Genomics of Drug Sensitivity in Cancer (GDSC) datasets, I built a machine learning pipeline that predicts drug sensitivity, measured as LN(IC50), for 464 drug–screen units. The evaluation is designed to avoid common pitfalls (preprocessing leakage, model selection on test data, circular enrichment tests), and every result is reported next to simple baselines. Predictions are then tested on an independent screen (PRISM) using cell lines held out of training.
 
-**Interactive app:** [live app](<your-app-url>) · run locally with `streamlit run app/streamlit_app.py`
+**Interactive app:** run locally with `streamlit run app/streamlit_app.py`
 
 ### Headline findings
 
